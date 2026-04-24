@@ -57,8 +57,7 @@ async def handle_source_message(event):
 @client.on(events.NewMessage(chats=EXTRAPE_BOT))
 async def handle_extrape_response(event):
     text = event.message.text or ""
-    links = extract_amazon_links(text)
-    if links:
+    if text:
         print(f"[+] ExtraPe converted, sending whole message to Dealspouch...")
         # Send ExtraPe converted whole message to Dealspouch at once
         await client.send_message(DEALSPOUCH_BOT, text)
@@ -66,11 +65,10 @@ async def handle_extrape_response(event):
 @client.on(events.NewMessage(chats=DEALSPOUCH_BOT))
 async def handle_dealspouch_response(event):
     text = event.message.text or ""
-    links = extract_amazon_links(text)
-    if links:
-        print(f"[+] Dealspouch converted, sending to {MY_GROUP}...")
+    if text:
+        # Forward ANY reply from Dealspouch to your group ONCE
+        print(f"[+] Dealspouch replied, sending to {MY_GROUP}...")
         print(f"    {text[:80]}...")
-        # Send Dealspouch converted whole message to your group ONCE
         await client.send_message(MY_GROUP, text)
 
 async def run():
