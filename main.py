@@ -21,7 +21,7 @@ DESTINATION_GROUP = "@dealspouch_server_bot"
 MY_GROUP = "@finnindeals2"
 # ============================================================
 
-# Health check server
+# ================= HEALTH SERVER =================
 class HealthCheck(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -36,81 +36,134 @@ def run_health_server():
 
 threading.Thread(target=run_health_server, daemon=True).start()
 
+# ================= TELEGRAM CLIENT =================
 client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
-client._last_full_message = ""
 
+# ================= STORAGE =================
+pending_messages = {}
+# structure:
+# {
+#   original_msg_id: {
+#       "text": "...",
+#       "links": [...],
+#       "converted_links": []
+#   },
+#   extrape_msg_id: original_msg_id
+# }
+
+# ================= UTIL =================
 def extract_amazon_links(text):
     if not text:
         return []
     pattern = r'https?://(?:www\.)?(?:amazon\.in|amzn\.in|amzn\.to|amazon\.com)[^\s]*'
     return re.findall(pattern, text)
 
+# ================= SOURCE HANDLER =================
 @client.on(events.NewMessage(chats=SOURCE_GROUPS))
 async def handle_source_message(event):
     text = event.message.text or ""
     links = extract_amazon_links(text)
-    if links:
-        print(f"[+] Amazon message found in group: {event.chat_id}")
-        client._last_full_message = text
-        for link in links:
-            print(f"    Sending to ExtraPe bot: {link}")
-            await client.send_message(CONVERTER_BOT, link)
-            await asyncio.sleep(2)
 
+    if not links:
+        return
+
+    print(f"\n[+] New message with {len(links)} link(s) from source")
+
+    # store original message
+    pending_messages[event.id] = {
+        "text": text,
+        "links": links,
+        "converted_links": []
+    }
+
+    # send each link to ExtraPe bot
+    for link in links:
+        msg = await client.send_message(CONVERTER_BOT, link)
+        pending_messages[msg.id] = event.id  # map reply → original
+        await asyncio.sleep(2)
+
+# ================= EXTRAPE HANDLER =================
 @client.on(events.NewMessage(chats=CONVERTER_BOT))
 async def handle_extrape_response(event):
     text = event.message.text or ""
-    affiliate_links = extract_amazon_links(text)
-    if affiliate_links:
-        full_msg = getattr(client, '_last_full_message', '')
-        for link in affiliate_links:
-            if full_msg:
-                new_msg = re.sub(
-                    r'https?://(?:www\.)?(?:amazon\.in|amzn\.in|amzn\.to|amazon\.com)[^\s]*',
-                    link,
-                    full_msg
-                )
-            else:
-                new_msg = link
+    links = extract_amazon_links(text)
 
-            # Send to Dealspouch bot
-            print(f"[+] Forwarding to Dealspouch bot...")
-            await client.send_message(DESTINATION_GROUP, new_msg)
-            await asyncio.sleep(2)
+    if not links or not event.reply_to_msg_id:
+        return
 
-        client._last_full_message = ""
-    elif text:
-        print(f"[ExtraPe Bot replied]: {text}")
+    original_id = pending_messages.get(event.reply_to_msg_id)
 
+    if not original_id:
+        return
+
+    data = pending_messages.get(original_id)
+    if not data:
+        return
+
+    converted_link = links[0]
+    data["converted_links"].append(converted_link)
+
+    print(f"[+] ExtraPe converted link received ({len(data['converted_links'])}/{len(data['links'])})")
+
+    # when all links are converted
+    if len(data["converted_links"]) == len(data["links"]):
+        final_text = data["text"]
+
+        # replace links one-by-one
+        for old, new in zip(data["links"], data["converted_links"]):
+            final_text = final_text.replace(old, new, 1)
+
+        print("[+] Sending FINAL message to Dealspouch...")
+        msg = await client.send_message(DESTINATION_GROUP, final_text)
+
+        # map Dealspouch reply
+        pending_messages[msg.id] = original_id
+
+        # cleanup ExtraPe mappings
+        for key in list(pending_messages.keys()):
+            if pending_messages.get(key) == original_id and key != original_id:
+                pending_messages.pop(key, None)
+
+# ================= DEALSPOUCH HANDLER =================
 @client.on(events.NewMessage(chats=DESTINATION_GROUP))
 async def handle_dealspouch_response(event):
     text = event.message.text or ""
     links = extract_amazon_links(text)
-    if links:
-        # Forward Dealspouch converted message to your group
-        print(f"[+] Dealspouch replied, forwarding to @finnindeals2...")
-        await client.send_message(MY_GROUP, text)
-        await asyncio.sleep(1)
-    elif text:
-        print(f"[Dealspouch Bot replied]: {text}")
 
+    if not links or not event.reply_to_msg_id:
+        return
+
+    original_id = pending_messages.get(event.reply_to_msg_id)
+    if not original_id:
+        return
+
+    print("[+] Final converted message received → forwarding to MY_GROUP")
+
+    await client.send_message(MY_GROUP, text)
+    await asyncio.sleep(1)
+
+    # final cleanup
+    pending_messages.pop(original_id, None)
+    pending_messages.pop(event.reply_to_msg_id, None)
+
+# ================= MAIN LOOP =================
 async def run():
     while True:
         try:
             await client.start()
+
             print("✅ Bot started successfully!")
-            print(f"👂 Listening on  : {len(SOURCE_GROUPS)} group(s)")
-            for g in SOURCE_GROUPS:
-                print(f"   → {g}")
+            print(f"👂 Listening on {len(SOURCE_GROUPS)} group(s)")
             print(f"🤖 ExtraPe Bot   : {CONVERTER_BOT}")
             print(f"🤖 Dealspouch    : {DESTINATION_GROUP}")
-            print(f"📤 My Group      : {MY_GROUP}")
-            print("\n⏳ Waiting for Amazon links...\n")
+            print(f"📤 Final Group   : {MY_GROUP}")
+            print("\n⏳ Waiting for messages...\n")
+
             await client.run_until_disconnected()
+
         except Exception as e:
-            print(f"❌ Disconnected: {e}")
+            print(f"❌ Error: {e}")
             print("🔄 Reconnecting in 5 seconds...")
             await asyncio.sleep(5)
-            continue
 
 asyncio.run(run())
