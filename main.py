@@ -16,8 +16,8 @@ SOURCE_GROUPS = [
     -1001389782464
 ]
 
-CONVERTER_BOT = "@ExtraPeBot"
-DESTINATION_GROUP = "@dealspouch_server_bot"
+EXTRAPE_BOT = "@ExtraPeBot"
+DEALSPOUCH_BOT = "@dealspouch_server_bot"
 MY_GROUP = "@finnindeals2"
 # ============================================================
 
@@ -37,7 +37,6 @@ def run_health_server():
 threading.Thread(target=run_health_server, daemon=True).start()
 
 client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
-client._last_full_message = ""
 
 def extract_amazon_links(text):
     if not text:
@@ -50,61 +49,41 @@ async def handle_source_message(event):
     text = event.message.text or ""
     links = extract_amazon_links(text)
     if links:
-        print(f"[+] Amazon message found in group: {event.chat_id}")
-        client._last_full_message = text
-        for link in links:
-            print(f"    Sending to ExtraPe bot: {link}")
-            await client.send_message(CONVERTER_BOT, link)
-            await asyncio.sleep(2)
+        print(f"[+] Found {len(links)} link(s) in source group")
+        print(f"    Sending whole message to ExtraPe...")
+        # Send WHOLE message to ExtraPe at once
+        await client.send_message(EXTRAPE_BOT, text)
 
-@client.on(events.NewMessage(chats=CONVERTER_BOT))
+@client.on(events.NewMessage(chats=EXTRAPE_BOT))
 async def handle_extrape_response(event):
     text = event.message.text or ""
-    affiliate_links = extract_amazon_links(text)
-    if affiliate_links:
-        full_msg = getattr(client, '_last_full_message', '')
-        for link in affiliate_links:
-            if full_msg:
-                new_msg = re.sub(
-                    r'https?://(?:www\.)?(?:amazon\.in|amzn\.in|amzn\.to|amazon\.com)[^\s]*',
-                    link,
-                    full_msg
-                )
-            else:
-                new_msg = link
+    links = extract_amazon_links(text)
+    if links:
+        print(f"[+] ExtraPe converted, sending whole message to Dealspouch...")
+        # Send ExtraPe converted whole message to Dealspouch at once
+        await client.send_message(DEALSPOUCH_BOT, text)
 
-            # Send to Dealspouch bot
-            print(f"[+] Forwarding to Dealspouch bot...")
-            await client.send_message(DESTINATION_GROUP, new_msg)
-            await asyncio.sleep(2)
-
-        client._last_full_message = ""
-    elif text:
-        print(f"[ExtraPe Bot replied]: {text}")
-
-@client.on(events.NewMessage(chats=DESTINATION_GROUP))
+@client.on(events.NewMessage(chats=DEALSPOUCH_BOT))
 async def handle_dealspouch_response(event):
     text = event.message.text or ""
     links = extract_amazon_links(text)
     if links:
-        # Forward Dealspouch converted message to your group
-        print(f"[+] Dealspouch replied, forwarding to @finnindeals2...")
+        print(f"[+] Dealspouch converted, sending to {MY_GROUP}...")
+        print(f"    {text[:80]}...")
+        # Send Dealspouch converted whole message to your group ONCE
         await client.send_message(MY_GROUP, text)
-        await asyncio.sleep(1)
-    elif text:
-        print(f"[Dealspouch Bot replied]: {text}")
 
 async def run():
     while True:
         try:
             await client.start()
             print("✅ Bot started successfully!")
-            print(f"👂 Listening on  : {len(SOURCE_GROUPS)} group(s)")
+            print(f"👂 Source Groups  : {len(SOURCE_GROUPS)} group(s)")
             for g in SOURCE_GROUPS:
                 print(f"   → {g}")
-            print(f"🤖 ExtraPe Bot   : {CONVERTER_BOT}")
-            print(f"🤖 Dealspouch    : {DESTINATION_GROUP}")
-            print(f"📤 My Group      : {MY_GROUP}")
+            print(f"🤖 ExtraPe Bot    : {EXTRAPE_BOT}")
+            print(f"🤖 Dealspouch Bot : {DEALSPOUCH_BOT}")
+            print(f"📤 My Group       : {MY_GROUP}")
             print("\n⏳ Waiting for Amazon links...\n")
             await client.run_until_disconnected()
         except Exception as e:
