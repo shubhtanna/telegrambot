@@ -13,15 +13,16 @@ API_HASH = "b59b9b90de1866874af520878519c5ed"              # ← your api_hash
 STRING_SESSION = "1BVtsOGgBuxckDhS1glEpDBxOmdjmY202iRQLZkUNW20wN2jRWF3ykveglBVpoQWGpDIEEMXlXWZfQ0sjIMwyg2dpQ3Pzm4k-PT_OIBu8PqiutrnrRB5cW9D0ddV-m0PFjS__k4d3QKWSTvP68G4Bez2FU2lxAAA0zY8KudG_i0jizMlSGMGF3gEuZZ7LhdoSroUe4hdLt4U-9l57B0cSuN_8V9RfzPwztaWoQikLIhEMW9ZMT0_b8S322jCpHHvyACMK-JFCZlbw9iwSYyul_6a4wakVyk1jpbcFZP0vlLSquEXb0tv7INVfPRxMGuWtsaY99FiavSCujckJ5k5bgz0C40Vlzgg="        # ← your string session
 
 SOURCE_GROUPS = [
-    -1001493857075,        # Best Deals in India
-    -1001412868909,        # ← Add second group ID here
+    -1001493857075,     
+    -1001412868909,
 ]
 
 CONVERTER_BOT = "@ExtraPeBot"
 DESTINATION_GROUP = "@dealspouch_server_bot"
+MY_GROUP = "@finnindeals2"
 # ============================================================
 
-# Health check server so Railway gives a URL
+# Health check server
 class HealthCheck(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -74,10 +75,17 @@ async def handle_bot_response(event):
                 )
             else:
                 new_msg = link
-            print(f"[+] Forwarding full message to Dealspouch...")
-            print(f"    {new_msg[:80]}...")
+
+            # Step 1 - Send to Dealspouch
+            print(f"[+] Forwarding to Dealspouch...")
             await client.send_message(DESTINATION_GROUP, new_msg)
             await asyncio.sleep(1)
+
+            # Step 2 - Also send to your own group
+            print(f"[+] Forwarding to @finnindeals2...")
+            await client.send_message(MY_GROUP, new_msg)
+            await asyncio.sleep(1)
+
         client._last_full_message = ""
     elif text:
         print(f"[Bot replied]: {text}")
@@ -91,7 +99,8 @@ async def run():
             for g in SOURCE_GROUPS:
                 print(f"   → {g}")
             print(f"🤖 Converter Bot : {CONVERTER_BOT}")
-            print(f"📤 Sending to    : {DESTINATION_GROUP}")
+            print(f"📤 Dealspouch    : {DESTINATION_GROUP}")
+            print(f"📤 My Group      : {MY_GROUP}")
             print("\n⏳ Waiting for Amazon links...\n")
             await client.run_until_disconnected()
         except Exception as e:
