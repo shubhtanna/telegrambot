@@ -6,8 +6,6 @@ import asyncio
 import re
 
 # ============================================================
-# FILL IN YOUR DETAILS
-# ============================================================
 API_ID = 37485844                 # ← your api_id
 API_HASH = "b59b9b90de1866874af520878519c5ed"              # ← your api_hash
 STRING_SESSION = "1BVtsOGgBuxckDhS1glEpDBxOmdjmY202iRQLZkUNW20wN2jRWF3ykveglBVpoQWGpDIEEMXlXWZfQ0sjIMwyg2dpQ3Pzm4k-PT_OIBu8PqiutrnrRB5cW9D0ddV-m0PFjS__k4d3QKWSTvP68G4Bez2FU2lxAAA0zY8KudG_i0jizMlSGMGF3gEuZZ7LhdoSroUe4hdLt4U-9l57B0cSuN_8V9RfzPwztaWoQikLIhEMW9ZMT0_b8S322jCpHHvyACMK-JFCZlbw9iwSYyul_6a4wakVyk1jpbcFZP0vlLSquEXb0tv7INVfPRxMGuWtsaY99FiavSCujckJ5k5bgz0C40Vlzgg="        # ← your string session
@@ -38,7 +36,6 @@ def run_health_server():
 
 threading.Thread(target=run_health_server, daemon=True).start()
 
-# Telegram client
 client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
 client._last_full_message = ""
 
@@ -54,15 +51,14 @@ async def handle_source_message(event):
     links = extract_amazon_links(text)
     if links:
         print(f"[+] Amazon message found in group: {event.chat_id}")
-        print(f"    Message: {text[:60]}...")
         client._last_full_message = text
         for link in links:
-            print(f"    Sending to converter bot: {link}")
+            print(f"    Sending to ExtraPe bot: {link}")
             await client.send_message(CONVERTER_BOT, link)
             await asyncio.sleep(2)
 
 @client.on(events.NewMessage(chats=CONVERTER_BOT))
-async def handle_bot_response(event):
+async def handle_extrape_response(event):
     text = event.message.text or ""
     affiliate_links = extract_amazon_links(text)
     if affiliate_links:
@@ -77,19 +73,26 @@ async def handle_bot_response(event):
             else:
                 new_msg = link
 
-            # Step 1 - Send to Dealspouch
-            print(f"[+] Forwarding to Dealspouch...")
+            # Send to Dealspouch bot
+            print(f"[+] Forwarding to Dealspouch bot...")
             await client.send_message(DESTINATION_GROUP, new_msg)
-            await asyncio.sleep(1)
-
-            # Step 2 - Also send to your own group
-            print(f"[+] Forwarding to @finnindeals2...")
-            await client.send_message(MY_GROUP, new_msg)
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)
 
         client._last_full_message = ""
     elif text:
-        print(f"[Bot replied]: {text}")
+        print(f"[ExtraPe Bot replied]: {text}")
+
+@client.on(events.NewMessage(chats=DESTINATION_GROUP))
+async def handle_dealspouch_response(event):
+    text = event.message.text or ""
+    links = extract_amazon_links(text)
+    if links:
+        # Forward Dealspouch converted message to your group
+        print(f"[+] Dealspouch replied, forwarding to @finnindeals2...")
+        await client.send_message(MY_GROUP, text)
+        await asyncio.sleep(1)
+    elif text:
+        print(f"[Dealspouch Bot replied]: {text}")
 
 async def run():
     while True:
@@ -99,8 +102,8 @@ async def run():
             print(f"👂 Listening on  : {len(SOURCE_GROUPS)} group(s)")
             for g in SOURCE_GROUPS:
                 print(f"   → {g}")
-            print(f"🤖 Converter Bot : {CONVERTER_BOT}")
-            print(f"📤 Dealspouch    : {DESTINATION_GROUP}")
+            print(f"🤖 ExtraPe Bot   : {CONVERTER_BOT}")
+            print(f"🤖 Dealspouch    : {DESTINATION_GROUP}")
             print(f"📤 My Group      : {MY_GROUP}")
             print("\n⏳ Waiting for Amazon links...\n")
             await client.run_until_disconnected()
