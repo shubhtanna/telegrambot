@@ -1,4 +1,4 @@
 telethon
 aiohttp
 pytz
-tweepy
+tweepy>=4.14.0
