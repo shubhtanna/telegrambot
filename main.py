@@ -8,7 +8,7 @@ import re
 # ============================================================
 API_ID = 37485844                 # ← your api_id
 API_HASH = "b59b9b90de1866874af520878519c5ed"              # ← your api_hash
-STRING_SESSION = "1BVtsOHQBuwEUbaywqR9-zaVfBTGOK4UI19nM1TGuffHKJ3e19vbYcyJt_Rx5C3m7Frb_ZEd5EHJvYrSWW_C-AAKYOGEO9nL2uzdYkZDbXQtobn0yzplQ9GrbnmP_MPFF4oxYRexKLOnot7DIGDICXldpWfBDUjUEuo-R52E78fQzsJsl01Jz9U1x7nA2iLMNaqfJPOp-Qcb6DVqB_JNVVSWlHfLl9xk0i3VFjhkmUlyJiNLd3nt-yIaKwSHWnG6plScR5tQ8OfOL6bISUY7siMHMr38SjAL7i2gO46dtkw0eEO-2gea3SsAfDahEtw83LVBEzknYDA3wE2xwDXxE6YOYIRfQWcM="        # ← your string session
+# STRING_SESSION = "1BVtsOHQBuwEUbaywqR9-zaVfBTGOK4UI19nM1TGuffHKJ3e19vbYcyJt_Rx5C3m7Frb_ZEd5EHJvYrSWW_C-AAKYOGEO9nL2uzdYkZDbXQtobn0yzplQ9GrbnmP_MPFF4oxYRexKLOnot7DIGDICXldpWfBDUjUEuo-R52E78fQzsJsl01Jz9U1x7nA2iLMNaqfJPOp-Qcb6DVqB_JNVVSWlHfLl9xk0i3VFjhkmUlyJiNLd3nt-yIaKwSHWnG6plScR5tQ8OfOL6bISUY7siMHMr38SjAL7i2gO46dtkw0eEO-2gea3SsAfDahEtw83LVBEzknYDA3wE2xwDXxE6YOYIRfQWcM="        # ← your string session
 
 SOURCE_GROUPS = [
     -1001493857075,     
