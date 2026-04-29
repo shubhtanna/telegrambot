@@ -2,13 +2,13 @@ from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 from http.server import HTTPServer, BaseHTTPRequestHandler
-import asyncio, re, io, logging, time, aiohttp, os, threading
+from datetime import datetime
+import asyncio, re, io, logging, time, aiohttp, os, threading, pytz
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
-# ── CONFIG — Railway environment variables se aayega ──
-# ── CONFIG — Railway environment variables ──
+# ── CONFIG ──
 API_ID         = int(os.environ.get("API_ID"))
 API_HASH       = os.environ.get("API_HASH")
 STRING_SESSION = os.environ.get("STRING_SESSION")
@@ -25,7 +25,16 @@ EXTRAPE_BOT    = "@ExtraPeBot"
 DEALSPOUCH_BOT = "@dealspouch_server_bot"
 MY_TG_GROUP    = "@finnindeals2"
 
-# ── Health check server (Railway ke liye) ──
+# ── Quiet Hours (IST) ──
+def is_quiet_hours():
+    """Returns True if current IST time is between 12:30 AM and 8:00 AM."""
+    ist = pytz.timezone("Asia/Kolkata")
+    now = datetime.now(ist)
+    quiet_start = now.replace(hour=0, minute=30, second=0, microsecond=0)
+    quiet_end   = now.replace(hour=8, minute=0, second=0, microsecond=0)
+    return quiet_start <= now < quiet_end
+
+# ── Health check server ──
 class HealthCheck(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -178,6 +187,7 @@ async def handle_dealspouch(event):
 
     log.info(f"[DEALSPOUCH] ✅ Valid! Posting to TG + WhatsApp...")
 
+    # ── Telegram: always post ──
     try:
         if media_bytes:
             await client.send_file(MY_TG_GROUP, media_bytes, caption=text)
@@ -188,7 +198,11 @@ async def handle_dealspouch(event):
     except Exception as e:
         log.error(f"[TG] ❌ Failed: {e}")
 
-    await send_to_whatsapp(text, media_bytes)
+    # ── WhatsApp: skip during quiet hours ──
+    if is_quiet_hours():
+        log.info(f"[WA] 🌙 Quiet hours (12:30 AM – 8:00 AM IST) — skipping WhatsApp")
+    else:
+        await send_to_whatsapp(text, media_bytes)
 
 # ── Main ──
 async def run():
