@@ -4,7 +4,6 @@ from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 import asyncio, re, io, logging, time, aiohttp, os, threading, pytz
-import tweepy
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -16,12 +15,6 @@ STRING_SESSION = os.environ.get("STRING_SESSION")
 BAILEYS_URL    = os.environ.get("BAILEYS_URL")
 BAILEYS_SECRET = os.environ.get("BAILEYS_SECRET", "mysecret123")
 
-# ── Twitter/X credentials ──
-TWITTER_API_KEY       = os.environ.get("TWITTER_API_KEY")
-TWITTER_API_SECRET    = os.environ.get("TWITTER_API_SECRET")
-TWITTER_ACCESS_TOKEN  = os.environ.get("TWITTER_ACCESS_TOKEN")
-TWITTER_ACCESS_SECRET = os.environ.get("TWITTER_ACCESS_SECRET")
-
 SOURCE_GROUPS = [
     -1001493857075,
     -1001412868909,
@@ -32,32 +25,6 @@ EXTRAPE_BOT    = "@ExtraPeBot"
 DEALSPOUCH_BOT = "@dealspouch_server_bot"
 MY_TG_GROUP    = "@finnindeals2"
 
-# ── Twitter client setup ──
-def get_twitter_client():
-    if not all([TWITTER_API_KEY, TWITTER_API_SECRET, TWITTER_ACCESS_TOKEN, TWITTER_ACCESS_SECRET]):
-        log.warning("[TWITTER] ❌ One or more credentials missing!")
-        return None, None
-    try:
-        client_v2 = tweepy.Client(
-            consumer_key=TWITTER_API_KEY,
-            consumer_secret=TWITTER_API_SECRET,
-            access_token=TWITTER_ACCESS_TOKEN,
-            access_token_secret=TWITTER_ACCESS_SECRET,
-            wait_on_rate_limit=True
-        )
-        auth = tweepy.OAuth1UserHandler(
-            TWITTER_API_KEY, TWITTER_API_SECRET,
-            TWITTER_ACCESS_TOKEN, TWITTER_ACCESS_SECRET
-        )
-        api_v1 = tweepy.API(auth)
-        log.info("[TWITTER] ✅ Client ready!")
-        return client_v2, api_v1
-    except Exception as e:
-        log.error(f"[TWITTER] ❌ Setup failed: {e}")
-        return None, None
-
-twitter_v2, twitter_v1 = get_twitter_client()
-
 # ── IST Time Helpers ──
 def get_ist_now():
     ist = pytz.timezone("Asia/Kolkata")
@@ -67,7 +34,7 @@ def is_quiet_hours():
     now = get_ist_now()
     current_minutes = now.hour * 60 + now.minute
 
-    # Quiet: 00:30 to 08:00 IST
+    # Quiet: 00:30 to 08:00 IST — no WhatsApp during this window
     quiet_start = 0 * 60 + 30   # 00:30 = 30 min
     quiet_end   = 8 * 60 + 0    # 08:00 = 480 min
 
@@ -96,7 +63,6 @@ stats = {
     "sent_to_dealspouch": 0,
     "posted_to_tg": 0,
     "sent_to_wa": 0,
-    "posted_to_twitter": 0,
     "ignored": 0,
 }
 
@@ -107,16 +73,6 @@ last_extrape_handled = 0
 last_dealspouch_handled = 0
 EXTRAPE_COOLDOWN = 15
 DEALSPOUCH_COOLDOWN = 15
-
-# ── Smart Twitter truncation (280 char limit) ──
-def truncate_for_twitter(text, max_len=270):
-    if len(text) <= max_len:
-        return text
-    urls = re.findall(r'https?://\S+', text)
-    link = urls[0] if urls else ""
-    text_no_link = text.replace(link, "").strip()
-    available = max_len - len(link) - 4
-    return text_no_link[:available] + "...\n" + link
 
 def extract_amazon_links(text):
     if not text:
@@ -169,59 +125,6 @@ async def send_to_whatsapp(text, image_bytes=None):
     except Exception as e:
         log.error(f"[WA] ❌ Failed: {e}")
 
-# ── Send to Twitter/X ──
-async def send_to_twitter(text, image_bytes=None):
-    if not twitter_v2:
-        log.warning("[TWITTER] ❌ Client not ready, skipping...")
-        return
-    try:
-        tweet_text = truncate_for_twitter(text)
-        media_id = None
-
-        # Try image upload via v1 (only works on paid tier)
-        if image_bytes and twitter_v1:
-            try:
-                img_buf = io.BytesIO(image_bytes)
-                img_buf.name = "deal.jpg"
-                media = twitter_v1.media_upload(filename="deal.jpg", file=img_buf)
-                media_id = media.media_id
-                log.info(f"[TWITTER] 🖼️ Image uploaded, media_id: {media_id}")
-            except Exception as e:
-                log.warning(f"[TWITTER] ⚠️ Image upload failed, posting text only: {e}")
-                media_id = None
-
-        # Post tweet
-        if media_id:
-            response = twitter_v2.create_tweet(text=tweet_text, media_ids=[media_id])
-        else:
-            response = twitter_v2.create_tweet(text=tweet_text)
-
-        tweet_id = response.data["id"]
-        log.info(f"[TWITTER] ✅ Tweeted! https://twitter.com/i/web/status/{tweet_id}")
-        stats["posted_to_twitter"] += 1
-
-    except tweepy.TweepyException as e:
-        error_str = str(e)
-        if "401" in error_str:
-            log.error(f"[TWITTER] ❌ 401 Unauthorized — Check: 1) App has Read+Write permission 2) Regenerate Access Token after changing permissions 3) Free tier may not allow posting")
-        elif "403" in error_str:
-            log.error(f"[TWITTER] ❌ 403 Forbidden — Free tier does not support create_tweet. Upgrade to Basic plan at developer.twitter.com")
-        else:
-            log.error(f"[TWITTER] ❌ Tweepy error: {e}")
-    except Exception as e:
-        log.error(f"[TWITTER] ❌ Exception: {e}")
-
-# ── Twitter test on startup ──
-async def test_twitter():
-    if not twitter_v2:
-        log.error("[TWITTER] ❌ Client is None — credentials missing or invalid")
-        return
-    try:
-        me = twitter_v2.get_me()
-        log.info(f"[TWITTER] ✅ Authenticated as: @{me.data.username}")
-    except tweepy.TweepyException as e:
-        log.error(f"[TWITTER] ❌ Auth test failed: {e}")
-
 # ── STEP 1: Source group → ExtraPe ──
 @client.on(events.NewMessage(chats=SOURCE_GROUPS))
 async def handle_source(event):
@@ -267,7 +170,7 @@ async def handle_extrape(event):
     pending_media[sent.id] = media_bytes
     stats["sent_to_dealspouch"] += 1
 
-# ── STEP 3: Dealspouch → TG + WhatsApp + Twitter ──
+# ── STEP 3: Dealspouch → TG + WhatsApp ──
 @client.on(events.NewMessage(chats=DEALSPOUCH_BOT))
 async def handle_dealspouch(event):
     global last_dealspouch_handled
@@ -291,7 +194,7 @@ async def handle_dealspouch(event):
         media_bytes = pending_media.pop(oldest_key)
 
     ist_now = get_ist_now()
-    log.info(f"[DEALSPOUCH] ✅ Valid! IST: {ist_now.strftime('%H:%M')} | Quiet={is_quiet_hours()} | Posting to TG + WA + Twitter...")
+    log.info(f"[DEALSPOUCH] ✅ Valid! IST: {ist_now.strftime('%H:%M')} | Quiet={is_quiet_hours()} | Posting to TG + WA...")
 
     # ── Telegram: always post ──
     try:
@@ -310,9 +213,6 @@ async def handle_dealspouch(event):
     else:
         await send_to_whatsapp(text, media_bytes)
 
-    # ── Twitter: always post (no quiet hours) ──
-    await send_to_twitter(text, media_bytes)
-
 # ── Main ──
 async def run():
     while True:
@@ -322,11 +222,6 @@ async def run():
             log.info(f"✅ Logged in as: {me.first_name} (@{me.username})")
             log.info(f"👂 Watching {len(SOURCE_GROUPS)} source group(s)")
             log.info(f"📲 WA Sender  : {BAILEYS_URL or 'NOT SET'}")
-            log.info(f"🐦 Twitter    : {'✅ Ready' if twitter_v2 else '❌ NOT SET'}")
-
-            # Test Twitter auth on startup
-            await test_twitter()
-
             log.info("⏳ Waiting for deals...\n")
             await client.run_until_disconnected()
         except Exception as e:
