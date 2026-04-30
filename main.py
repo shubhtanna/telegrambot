@@ -59,12 +59,19 @@ twitter_v2, twitter_v1 = get_twitter_client()
 
 # ── Quiet Hours — DISABLED for testing ──
 def is_quiet_hours():
-    return False  # ← re-enable later by uncommenting below
-    # ist = pytz.timezone("Asia/Kolkata")
-    # now = datetime.now(ist)
-    # quiet_start = now.replace(hour=0, minute=30, second=0, microsecond=0)
-    # quiet_end   = now.replace(hour=8, minute=0, second=0, microsecond=0)
-    # return quiet_start <= now < quiet_end
+    ist = pytz.timezone("Asia/Kolkata")
+    now = datetime.now(ist)
+    current_minutes = now.hour * 60 + now.minute
+
+    # Quiet: 00:30 (12:30 AM) to random time between 8:00–9:00 AM
+    quiet_start = 0 * 60 + 30      # 00:30 → 30 minutes
+    quiet_end   = 8 * 60 + 0       # 08:00 → 480 minutes (fixed, change if needed)
+
+    # Handles midnight rollover: 00:30 to 08:00
+    if quiet_start <= current_minutes < quiet_end:
+        return True
+
+    return False
 
 # ── Health check server ──
 class HealthCheck(BaseHTTPRequestHandler):
