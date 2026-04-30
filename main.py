@@ -38,11 +38,12 @@ def get_twitter_client():
         log.warning("[TWITTER] ❌ One or more credentials missing!")
         return None, None
     try:
-        client = tweepy.Client(
+        client_v2 = tweepy.Client(
             consumer_key=TWITTER_API_KEY,
             consumer_secret=TWITTER_API_SECRET,
             access_token=TWITTER_ACCESS_TOKEN,
-            access_token_secret=TWITTER_ACCESS_SECRET
+            access_token_secret=TWITTER_ACCESS_SECRET,
+            wait_on_rate_limit=True
         )
         auth = tweepy.OAuth1UserHandler(
             TWITTER_API_KEY, TWITTER_API_SECRET,
@@ -50,27 +51,28 @@ def get_twitter_client():
         )
         api_v1 = tweepy.API(auth)
         log.info("[TWITTER] ✅ Client ready!")
-        return client, api_v1
+        return client_v2, api_v1
     except Exception as e:
         log.error(f"[TWITTER] ❌ Setup failed: {e}")
         return None, None
 
 twitter_v2, twitter_v1 = get_twitter_client()
 
-# ── Quiet Hours — DISABLED for testing ──
-def is_quiet_hours():
+# ── IST Time Helpers ──
+def get_ist_now():
     ist = pytz.timezone("Asia/Kolkata")
-    now = datetime.now(ist)
+    return datetime.now(ist)
+
+def is_quiet_hours():
+    now = get_ist_now()
     current_minutes = now.hour * 60 + now.minute
 
-    # Quiet: 00:30 (12:30 AM) to random time between 8:00–9:00 AM
-    quiet_start = 0 * 60 + 30      # 00:30 → 30 minutes
-    quiet_end   = 8 * 60 + 0       # 08:00 → 480 minutes (fixed, change if needed)
+    # Quiet: 00:30 to 08:00 IST
+    quiet_start = 0 * 60 + 30   # 00:30 = 30 min
+    quiet_end   = 8 * 60 + 0    # 08:00 = 480 min
 
-    # Handles midnight rollover: 00:30 to 08:00
     if quiet_start <= current_minutes < quiet_end:
         return True
-
     return False
 
 # ── Health check server ──
@@ -169,14 +171,15 @@ async def send_to_whatsapp(text, image_bytes=None):
 
 # ── Send to Twitter/X ──
 async def send_to_twitter(text, image_bytes=None):
-    if not twitter_v2 or not twitter_v1:
+    if not twitter_v2:
         log.warning("[TWITTER] ❌ Client not ready, skipping...")
         return
     try:
         tweet_text = truncate_for_twitter(text)
         media_id = None
 
-        if image_bytes:
+        # Try image upload via v1 (only works on paid tier)
+        if image_bytes and twitter_v1:
             try:
                 img_buf = io.BytesIO(image_bytes)
                 img_buf.name = "deal.jpg"
@@ -187,6 +190,7 @@ async def send_to_twitter(text, image_bytes=None):
                 log.warning(f"[TWITTER] ⚠️ Image upload failed, posting text only: {e}")
                 media_id = None
 
+        # Post tweet
         if media_id:
             response = twitter_v2.create_tweet(text=tweet_text, media_ids=[media_id])
         else:
@@ -197,9 +201,26 @@ async def send_to_twitter(text, image_bytes=None):
         stats["posted_to_twitter"] += 1
 
     except tweepy.TweepyException as e:
-        log.error(f"[TWITTER] ❌ Tweepy error: {e}")
+        error_str = str(e)
+        if "401" in error_str:
+            log.error(f"[TWITTER] ❌ 401 Unauthorized — Check: 1) App has Read+Write permission 2) Regenerate Access Token after changing permissions 3) Free tier may not allow posting")
+        elif "403" in error_str:
+            log.error(f"[TWITTER] ❌ 403 Forbidden — Free tier does not support create_tweet. Upgrade to Basic plan at developer.twitter.com")
+        else:
+            log.error(f"[TWITTER] ❌ Tweepy error: {e}")
     except Exception as e:
         log.error(f"[TWITTER] ❌ Exception: {e}")
+
+# ── Twitter test on startup ──
+async def test_twitter():
+    if not twitter_v2:
+        log.error("[TWITTER] ❌ Client is None — credentials missing or invalid")
+        return
+    try:
+        me = twitter_v2.get_me()
+        log.info(f"[TWITTER] ✅ Authenticated as: @{me.data.username}")
+    except tweepy.TweepyException as e:
+        log.error(f"[TWITTER] ❌ Auth test failed: {e}")
 
 # ── STEP 1: Source group → ExtraPe ──
 @client.on(events.NewMessage(chats=SOURCE_GROUPS))
@@ -269,7 +290,8 @@ async def handle_dealspouch(event):
         oldest_key = next(iter(pending_media))
         media_bytes = pending_media.pop(oldest_key)
 
-    log.info(f"[DEALSPOUCH] ✅ Valid! Posting to TG + WA + Twitter...")
+    ist_now = get_ist_now()
+    log.info(f"[DEALSPOUCH] ✅ Valid! IST: {ist_now.strftime('%H:%M')} | Quiet={is_quiet_hours()} | Posting to TG + WA + Twitter...")
 
     # ── Telegram: always post ──
     try:
@@ -282,17 +304,14 @@ async def handle_dealspouch(event):
     except Exception as e:
         log.error(f"[TG] ❌ Failed: {e}")
 
-    # ── WhatsApp ── (quiet hours disabled for testing)
+    # ── WhatsApp: skip during quiet hours (00:30–08:00 IST) ──
     if is_quiet_hours():
-        log.info(f"[WA] 🌙 Quiet hours — skipping WhatsApp")
+        log.info(f"[WA] 🌙 Quiet hours ({ist_now.strftime('%H:%M')} IST) — skipping WhatsApp")
     else:
         await send_to_whatsapp(text, media_bytes)
 
-    # ── Twitter ── (quiet hours disabled for testing)
-    if is_quiet_hours():
-        log.info(f"[TWITTER] 🌙 Quiet hours — skipping Twitter")
-    else:
-        await send_to_twitter(text, media_bytes)
+    # ── Twitter: always post (no quiet hours) ──
+    await send_to_twitter(text, media_bytes)
 
 # ── Main ──
 async def run():
@@ -304,6 +323,10 @@ async def run():
             log.info(f"👂 Watching {len(SOURCE_GROUPS)} source group(s)")
             log.info(f"📲 WA Sender  : {BAILEYS_URL or 'NOT SET'}")
             log.info(f"🐦 Twitter    : {'✅ Ready' if twitter_v2 else '❌ NOT SET'}")
+
+            # Test Twitter auth on startup
+            await test_twitter()
+
             log.info("⏳ Waiting for deals...\n")
             await client.run_until_disconnected()
         except Exception as e:
