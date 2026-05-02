@@ -18,18 +18,92 @@ BAILEYS_URL    = os.environ.get("BAILEYS_URL")
 BAILEYS_SECRET = os.environ.get("BAILEYS_SECRET", "mysecret123")
 
 EXTRAPE_BOT    = "@ExtraPeBot"
+EARNKARO_BOT   = "@ekconverter4bot"
 DEALSPOUCH_BOT = "@dealspouch_server_bot"
 MY_TG_GROUP    = "@finnindeals2"
 
 # FK deals → this ONE WA group only
 FK_WA_GROUP = "120363427339438586@g.us"
 
+# CC deals → this WA group (replace with real ID when ready)
+CC_WA_GROUP = "120363426468421381@g.us"
+
+# This source group sends CC deals DIRECTLY — no bot conversion needed
+CC_DIRECT_GROUP = -1001481951196
+
 SOURCE_GROUPS = [
     -1001493857075,
     -1001412868909,
     -1001389782464,
     -1001480964161,
+    CC_DIRECT_GROUP,          # ← added CC direct group
 ]
+
+# ══════════════════════════════════════════
+#  CC DEAL DETECTION
+# ══════════════════════════════════════════
+
+# Short-link domains used in CC deals
+CC_SHORT_LINK_PATTERNS = re.compile(
+    r'https?://(?:'
+    r'bilty\.co|'
+    r'extp\.in|'
+    r'bit\.ly|'
+    r'tinyurl\.com|'
+    r'clnk\.in|'
+    r'isl\.co|'
+    r'go\.onelink\.me'
+    r')/\S+',
+    re.IGNORECASE
+)
+
+# Keywords that strongly indicate a CC deal post
+CC_KEYWORDS = re.compile(
+    r'\b('
+    r'credit card|'
+    r'lifetime free|'
+    r'joining fee|'
+    r'annual fee|'
+    r'cashback|'
+    r'rupay|'
+    r'rupay card|'
+    r'lounge access|'
+    r'airport lounge|'
+    r'credit score|'
+    r'popcoins|'
+    r'upi payment|'
+    r'welcome voucher|'
+    r'fuel surcharge|'
+    r'reward points|'
+    r'apply now|'
+    r'apply here|'
+    r'apply in'
+    r')\b',
+    re.IGNORECASE
+)
+
+def is_cc_deal(text):
+    """
+    Returns True if text looks like a credit card offer.
+    Requires BOTH a short link AND at least one CC keyword,
+    OR a strong keyword match alone (≥2 keyword hits).
+    """
+    if not text:
+        return False
+
+    has_short_link = bool(CC_SHORT_LINK_PATTERNS.search(text))
+    keyword_hits   = len(CC_KEYWORDS.findall(text))
+
+    if has_short_link and keyword_hits >= 1:
+        return True
+    if keyword_hits >= 2:          # Strong keyword signal even without known short link
+        return True
+    return False
+
+def extract_cc_short_links(text):
+    if not text:
+        return []
+    return CC_SHORT_LINK_PATTERNS.findall(text)
 
 # ══════════════════════════════════════════
 #  IST TIME HELPERS
@@ -68,6 +142,8 @@ stats = {
     "deals_found": 0,
     "sent_to_extrape": 0,
     "fk_sent_to_wa": 0,
+    "cc_sent_direct": 0,
+    "cc_sent_via_extrape": 0,
     "amz_sent_to_dealspouch": 0,
     "posted_to_tg": 0,
     "sent_to_wa_bulk": 0,
@@ -80,7 +156,7 @@ stats = {
 pending_media = {}
 
 # Store original links we sent to ExtraPe so we can detect echoes
-# { sent_message_id: set_of_original_links }
+# { sent_message_id: {"links": set, "is_cc": bool} }
 sent_links_store = {}
 
 client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
@@ -91,7 +167,7 @@ EXTRAPE_COOLDOWN    = 15
 DEALSPOUCH_COOLDOWN = 15
 
 # ══════════════════════════════════════════
-#  LINK DETECTORS
+#  LINK DETECTORS (Amazon / Flipkart)
 # ══════════════════════════════════════════
 def extract_amazon_links(text):
     if not text:
@@ -117,6 +193,19 @@ def extract_all_links(text):
 def has_dealspouch_link(text):
     return text and "amaz.dealspouch.com" in text
 
+def is_extrape_failure(text):
+    """
+    Returns True if ExtraPe could not convert the link.
+    ExtraPe's failure message: "We will not be able to convert these Links: ..."
+    """
+    if not text:
+        return False
+    return "will not be able to convert" in text.lower()
+
+# Store original full message text we sent to ExtraPe
+# { sent_message_id: original_text }
+sent_original_text = {}
+
 def is_echo_of_sent(text):
     """
     Returns True if the links in ExtraPe's reply are the SAME as what we sent.
@@ -127,13 +216,22 @@ def is_echo_of_sent(text):
     reply_links = extract_all_links(text)
     if not reply_links:
         return False
-    # Check against all recently sent link sets
-    for original_links in sent_links_store.values():
-        # If ANY link in reply matches original sent links — it's an echo
+    for entry in sent_links_store.values():
+        original_links = entry["links"]
         if reply_links & original_links:
             log.info(f"[EXTRAPE] 🔄 Echo detected — same links as sent. Waiting for converted reply...")
             return True
     return False
+
+def get_pending_is_cc():
+    """
+    Check if the oldest pending ExtraPe request was a CC deal.
+    Returns True if it was CC, False otherwise.
+    """
+    if not sent_links_store:
+        return False
+    oldest_key = next(iter(sent_links_store))
+    return sent_links_store[oldest_key].get("is_cc", False)
 
 # ══════════════════════════════════════════
 #  MEDIA DOWNLOADER
@@ -153,6 +251,7 @@ async def download_media_bytes(message):
 # ══════════════════════════════════════════
 
 async def send_to_whatsapp_bulk(text, image_bytes=None):
+    """Send to ALL WA groups (bulk broadcast)."""
     if not BAILEYS_URL:
         log.warning("[WA-BULK] BAILEYS_URL not set!")
         return
@@ -181,7 +280,8 @@ async def send_to_whatsapp_bulk(text, image_bytes=None):
     except Exception as e:
         log.error(f"[WA-BULK] ❌ Failed: {e}")
 
-async def send_to_whatsapp_single(text, image_bytes=None):
+async def send_to_whatsapp_single(text, target_group, image_bytes=None):
+    """Send to ONE specific WA group."""
     if not BAILEYS_URL:
         log.warning("[WA-SINGLE] BAILEYS_URL not set!")
         return
@@ -191,28 +291,31 @@ async def send_to_whatsapp_single(text, image_bytes=None):
                 form = aiohttp.FormData()
                 form.add_field("text", text or "")
                 form.add_field("secret", BAILEYS_SECRET)
-                form.add_field("target", FK_WA_GROUP)
+                form.add_field("target", target_group)
                 form.add_field("image", image_bytes, filename="deal.jpg", content_type="image/jpeg")
                 async with session.post(
                     f"{BAILEYS_URL}/send-single", data=form,
                     timeout=aiohttp.ClientTimeout(total=30)
                 ) as resp:
                     body = await resp.text()
-                    log.info(f"[WA-SINGLE] ✅ Sent! {body[:80]}")
+                    log.info(f"[WA-SINGLE] ✅ Sent to {target_group}! {body[:80]}")
             else:
                 async with session.post(
                     f"{BAILEYS_URL}/send-single",
-                    json={"text": text, "secret": BAILEYS_SECRET, "target": FK_WA_GROUP},
+                    json={"text": text, "secret": BAILEYS_SECRET, "target": target_group},
                     timeout=aiohttp.ClientTimeout(total=30)
                 ) as resp:
                     body = await resp.text()
-                    log.info(f"[WA-SINGLE] ✅ Sent! {body[:80]}")
-        stats["fk_sent_to_wa"] += 1
+                    log.info(f"[WA-SINGLE] ✅ Sent to {target_group}! {body[:80]}")
     except Exception as e:
         log.error(f"[WA-SINGLE] ❌ Failed: {e}")
 
 # ══════════════════════════════════════════
-#  STEP 1: Source groups → ExtraPe
+#  STEP 1: Source groups → Route by deal type
+#
+#  CC_DIRECT_GROUP  → CC deal → send directly to CC WA group
+#  All other groups → CC deal → ExtraPe bot for conversion
+#  All groups       → AMZ/FK  → ExtraPe bot (existing flow)
 # ══════════════════════════════════════════
 @client.on(events.NewMessage(chats=SOURCE_GROUPS))
 async def handle_source(event):
@@ -220,11 +323,68 @@ async def handle_source(event):
 
     amz_links = extract_amazon_links(text)
     fk_links  = extract_flipkart_links(text)
+    cc_deal   = is_cc_deal(text)
 
-    if not amz_links and not fk_links:
+    # ── Nothing relevant ──
+    if not amz_links and not fk_links and not cc_deal:
         return
 
     stats["deals_found"] += 1
+    chat_id = event.chat_id
+
+    # ══════════════════════════
+    #  CC DEAL — DIRECT GROUP
+    #  No bot conversion needed
+    # ══════════════════════════
+    if cc_deal and chat_id == CC_DIRECT_GROUP:
+        log.info(f"[CC-DIRECT] 💳 CC Deal #{stats['deals_found']} from direct group!")
+        media_bytes = await download_media_bytes(event.message)
+        log.info(f"[CC-DIRECT] 🖼️ Image: {'yes' if media_bytes else 'no'}")
+
+        ist_now = get_ist_now()
+        if is_quiet_hours():
+            log.info(f"[CC-DIRECT] 🌙 Quiet hours ({ist_now.strftime('%H:%M')} IST) — skipping")
+            stats["ignored"] += 1
+        else:
+            await send_to_whatsapp_single(text, CC_WA_GROUP, media_bytes)
+            stats["cc_sent_direct"] += 1
+            log.info(f"[CC-DIRECT] ✅ Sent directly to CC WA group")
+        return
+
+    # ══════════════════════════
+    #  CC DEAL — OTHER GROUPS
+    #  Send to ExtraPe for link conversion
+    # ══════════════════════════
+    if cc_deal and chat_id != CC_DIRECT_GROUP:
+        log.info(f"[CC-EXTRAPE] 💳 CC Deal #{stats['deals_found']} from group {chat_id} → ExtraPe")
+        media_bytes = await download_media_bytes(event.message)
+        log.info(f"[CC-EXTRAPE] 🖼️ Image: {'yes' if media_bytes else 'no'}")
+
+        temp_key = int(asyncio.get_event_loop().time() * 1000)
+        pending_media[temp_key] = media_bytes
+        original_links = extract_all_links(text)
+
+        sent = await client.send_message(EXTRAPE_BOT, text)
+        pending_media[sent.id] = pending_media.pop(temp_key)
+
+        # Track this as a CC deal so handle_extrape knows where to route
+        sent_links_store[sent.id] = {"links": original_links, "is_cc": True}
+        sent_original_text[sent.id] = text
+
+        if len(sent_links_store) > 20:
+            oldest = next(iter(sent_links_store))
+            del sent_links_store[oldest]
+            if oldest in sent_original_text:
+                del sent_original_text[oldest]
+
+        stats["sent_to_extrape"] += 1
+        log.info(f"[CC-EXTRAPE] 📤 Sent to ExtraPe (CC=True, tracking {len(original_links)} link(s))")
+        return
+
+    # ══════════════════════════
+    #  AMAZON / FLIPKART DEALS
+    #  Existing flow unchanged
+    # ══════════════════════════
     link_type = "Amazon" if amz_links else "Flipkart"
     log.info(f"[SOURCE] 🎯 {link_type} Deal #{stats['deals_found']} found!")
 
@@ -233,30 +393,33 @@ async def handle_source(event):
 
     temp_key = int(asyncio.get_event_loop().time() * 1000)
     pending_media[temp_key] = media_bytes
-
-    # Store original links so we can detect ExtraPe echoes
     original_links = extract_all_links(text)
 
     sent = await client.send_message(EXTRAPE_BOT, text)
     pending_media[sent.id] = pending_media.pop(temp_key)
 
-    # Save original links keyed by sent message id
-    sent_links_store[sent.id] = original_links
+    sent_links_store[sent.id] = {"links": original_links, "is_cc": False}
+    sent_original_text[sent.id] = text
 
-    # Keep sent_links_store small — max 20 entries
     if len(sent_links_store) > 20:
         oldest = next(iter(sent_links_store))
         del sent_links_store[oldest]
+        if oldest in sent_original_text:
+            del sent_original_text[oldest]
 
     stats["sent_to_extrape"] += 1
-    log.info(f"[EXTRAPE] 📤 Sent to ExtraPe (tracking {len(original_links)} original link(s))")
+    log.info(f"[EXTRAPE] 📤 Sent to ExtraPe (CC=False, tracking {len(original_links)} original link(s))")
 
 # ══════════════════════════════════════════
-#  STEP 2: ExtraPe reply → route by link type
+#  STEP 2: ExtraPe reply → route by deal type
 #
 #  ExtraPe sends 2 messages:
 #    Message 1 — echo of original input  → SKIP (same links we sent)
 #    Message 2 — converted links + image → USE THIS
+#
+#  If pending deal was CC  → send to CC WA group
+#  If Flipkart             → send to FK WA group
+#  If Amazon               → send to Dealspouch
 # ══════════════════════════════════════════
 @client.on(events.NewMessage(chats=EXTRAPE_BOT))
 async def handle_extrape(event):
@@ -264,6 +427,30 @@ async def handle_extrape(event):
 
     text = event.message.text or event.message.caption or ""
     if not text:
+        return
+
+    # ── ExtraPe couldn't convert → forward original to EarnKaro ──
+    if is_extrape_failure(text):
+        log.info(f"[EXTRAPE] ❌ Conversion failed — forwarding original to EarnKaro")
+
+        # Get the original text we sent to ExtraPe
+        original_text = None
+        if sent_original_text:
+            oldest_key = next(iter(sent_original_text))
+            original_text = sent_original_text.pop(oldest_key)
+
+        # Clean up state
+        sent_links_store.clear()
+        if pending_media:
+            oldest_key = next(iter(pending_media))
+            pending_media.pop(oldest_key)
+
+        if original_text:
+            await client.send_message(EARNKARO_BOT, original_text)
+            log.info(f"[EARNKARO] 📤 Forwarded original deal to EarnKaro bot — done, no WA/TG")
+            stats["ignored"] += 1   # not sent to WA, just forwarded for manual handling
+        else:
+            log.warning(f"[EARNKARO] ⚠️ No original text found to forward")
         return
 
     # ── Skip if ExtraPe is echoing our original input ──
@@ -277,8 +464,12 @@ async def handle_extrape(event):
         return
     last_extrape_handled = now
 
+    # Was this a CC deal we sent?
+    pending_is_cc = get_pending_is_cc()
+
     # Clear sent_links_store since we got the converted reply
     sent_links_store.clear()
+    sent_original_text.clear()
 
     # Get source image
     media_bytes = None
@@ -294,15 +485,28 @@ async def handle_extrape(event):
 
     ist_now = get_ist_now()
 
-    # ── Flipkart → single WA group ──
-    fk_links = extract_flipkart_links(text)
-    if fk_links:
-        log.info(f"[EXTRAPE] 🛒 FK converted → 1 WA group | image={'yes' if media_bytes else 'no'}")
+    # ── CC deal from other groups → CC WA group ──
+    # Check both: was it flagged as CC when sent, AND does reply still look like CC
+    if pending_is_cc or is_cc_deal(text):
+        log.info(f"[EXTRAPE] 💳 CC deal reply → CC WA group | image={'yes' if media_bytes else 'no'}")
         if is_quiet_hours():
-            log.info(f"[WA-SINGLE] 🌙 Quiet hours ({ist_now.strftime('%H:%M')} IST) — skipping")
+            log.info(f"[WA-SINGLE] 🌙 Quiet hours ({ist_now.strftime('%H:%M')} IST) — skipping CC")
             stats["ignored"] += 1
         else:
-            await send_to_whatsapp_single(text, media_bytes)
+            await send_to_whatsapp_single(text, CC_WA_GROUP, media_bytes)
+            stats["cc_sent_via_extrape"] += 1
+        return
+
+    # ── Flipkart → FK WA group ──
+    fk_links = extract_flipkart_links(text)
+    if fk_links:
+        log.info(f"[EXTRAPE] 🛒 FK converted → FK WA group | image={'yes' if media_bytes else 'no'}")
+        if is_quiet_hours():
+            log.info(f"[WA-SINGLE] 🌙 Quiet hours ({ist_now.strftime('%H:%M')} IST) — skipping FK")
+            stats["ignored"] += 1
+        else:
+            await send_to_whatsapp_single(text, FK_WA_GROUP, media_bytes)
+            stats["fk_sent_to_wa"] += 1
         return
 
     # ── Amazon → Dealspouch ──
@@ -319,6 +523,7 @@ async def handle_extrape(event):
 
 # ══════════════════════════════════════════
 #  STEP 3: Dealspouch → TG + WA bulk
+#  (Amazon only — unchanged)
 # ══════════════════════════════════════════
 @client.on(events.NewMessage(chats=DEALSPOUCH_BOT))
 async def handle_dealspouch(event):
@@ -371,10 +576,13 @@ async def run():
             me = await client.get_me()
             log.info(f"✅ Logged in as: {me.first_name} (@{me.username})")
             log.info(f"👂 Watching {len(SOURCE_GROUPS)} source group(s)")
-            log.info(f"🤖 ExtraPe Bot   : {EXTRAPE_BOT}  ← Amazon + Flipkart")
+            log.info(f"💳 CC Direct Group: {CC_DIRECT_GROUP}  ← no bot")
+            log.info(f"🤖 ExtraPe Bot   : {EXTRAPE_BOT}  ← Amazon + Flipkart + CC (other groups)")
+            log.info(f"🤖 EarnKaro Bot  : {EARNKARO_BOT}  ← fallback when ExtraPe fails")
             log.info(f"🤖 Dealspouch Bot: {DEALSPOUCH_BOT}  ← Amazon only")
             log.info(f"📢 TG Group      : {MY_TG_GROUP}")
-            log.info(f"📲 FK WA Group   : {FK_WA_GROUP}  ← Flipkart 1 group")
+            log.info(f"📲 FK WA Group   : {FK_WA_GROUP}")
+            log.info(f"📲 CC WA Group   : {CC_WA_GROUP}")
             log.info(f"📲 WA Sender     : {BAILEYS_URL or 'NOT SET'}")
             log.info("⏳ Waiting for deals...\n")
             await client.run_until_disconnected()
