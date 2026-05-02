@@ -260,8 +260,6 @@ async def handle_source(event):
 # ══════════════════════════════════════════
 @client.on(events.NewMessage(chats=EXTRAPE_BOT))
 async def handle_extrape(event):
-    text = event.message.text or event.message.caption or ""
-    log.info(f"[EXTRAPE-DEBUG] out={event.message.out} | text={text[:80]}")
     global last_extrape_handled
 
     text = event.message.text or event.message.caption or ""
