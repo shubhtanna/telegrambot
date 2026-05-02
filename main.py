@@ -108,6 +108,21 @@ def extract_flipkart_links(text):
 def has_dealspouch_link(text):
     return text and "amaz.dealspouch.com" in text
 
+def is_short_link_only(text):
+    """
+    Returns True if the message is ONLY a bare link with no deal description.
+    ExtraPe sends a short link-only message first, then a full message with image.
+    We skip the short one and wait for the full one.
+    """
+    if not text:
+        return False
+    stripped = text.strip()
+    lines = [l.strip() for l in stripped.splitlines() if l.strip()]
+    # If there's only 1 line and it's just a URL — it's the short first reply
+    if len(lines) == 1 and re.match(r'https?://\S+$', lines[0]):
+        return True
+    return False
+
 # ══════════════════════════════════════════
 #  MEDIA DOWNLOADER
 # ══════════════════════════════════════════
@@ -188,7 +203,6 @@ async def send_to_whatsapp_single(text, image_bytes=None):
 
 # ══════════════════════════════════════════
 #  STEP 1: Source groups → ExtraPe
-#  Sends BOTH Amazon + Flipkart links to ExtraPe
 # ══════════════════════════════════════════
 @client.on(events.NewMessage(chats=SOURCE_GROUPS))
 async def handle_source(event):
@@ -204,9 +218,8 @@ async def handle_source(event):
     link_type = "Amazon" if amz_links else "Flipkart"
     log.info(f"[SOURCE] 🎯 {link_type} Deal #{stats['deals_found']} found!")
 
-    # Download original image from source group message
     media_bytes = await download_media_bytes(event.message)
-    log.info(f"[SOURCE] 🖼️ Image from source: {'yes' if media_bytes else 'no'}")
+    log.info(f"[SOURCE] 🖼️ Image: {'yes' if media_bytes else 'no'}")
 
     temp_key = int(asyncio.get_event_loop().time() * 1000)
     pending_media[temp_key] = media_bytes
@@ -219,16 +232,25 @@ async def handle_source(event):
 # ══════════════════════════════════════════
 #  STEP 2: ExtraPe reply → route by link type
 #
-#  FK link  → /send-single → 1 WA group only
-#  AMZ link → Dealspouch  → TG + all WA groups
+#  ExtraPe sends TWO messages for FK deals:
+#    Message 1 — short link only  → SKIP (no deal text, no image)
+#    Message 2 — full deal + image → USE THIS ONE
+#
+#  For Amazon:
+#    Message 1 — short link only  → SKIP
+#    Message 2 — full deal text   → send to Dealspouch
 # ══════════════════════════════════════════
 @client.on(events.NewMessage(chats=EXTRAPE_BOT))
 async def handle_extrape(event):
     global last_extrape_handled
 
-    # Accept text OR caption (ExtraPe sometimes sends image+caption)
     text = event.message.text or event.message.caption or ""
     if not text:
+        return
+
+    # ── Skip short link-only first reply from ExtraPe ──
+    if is_short_link_only(text):
+        log.info(f"[EXTRAPE] ⏭️ Short link-only message — waiting for full deal message...")
         return
 
     now = time.time()
@@ -238,13 +260,13 @@ async def handle_extrape(event):
         return
     last_extrape_handled = now
 
-    # Get original source image stored in pending_media
+    # Get source image from pending_media
     media_bytes = None
     if pending_media:
         oldest_key = next(iter(pending_media))
         media_bytes = pending_media.pop(oldest_key)
 
-    # If no source image, try to download from ExtraPe reply itself
+    # If no source image, try ExtraPe's reply image (it sends product image in 2nd message)
     if not media_bytes:
         media_bytes = await download_media_bytes(event.message)
         if media_bytes:
@@ -255,7 +277,7 @@ async def handle_extrape(event):
     # ── Flipkart detected → single WA group ──
     fk_links = extract_flipkart_links(text)
     if fk_links:
-        log.info(f"[EXTRAPE] 🛒 FK link → 1 WA group | image={'yes' if media_bytes else 'no'}")
+        log.info(f"[EXTRAPE] 🛒 FK → 1 WA group | image={'yes' if media_bytes else 'no'}")
         if is_quiet_hours():
             log.info(f"[WA-SINGLE] 🌙 Quiet hours ({ist_now.strftime('%H:%M')} IST) — skipping")
             stats["ignored"] += 1
@@ -263,21 +285,20 @@ async def handle_extrape(event):
             await send_to_whatsapp_single(text, media_bytes)
         return
 
-    # ── Amazon detected → Dealspouch pipeline ──
+    # ── Amazon detected → Dealspouch ──
     amz_links = extract_amazon_links(text)
     if amz_links:
-        log.info(f"[EXTRAPE] ✅ AMZ link → Dealspouch | image={'yes' if media_bytes else 'no'}")
+        log.info(f"[EXTRAPE] ✅ AMZ → Dealspouch | image={'yes' if media_bytes else 'no'}")
         sent = await client.send_message(DEALSPOUCH_BOT, text)
         pending_media[sent.id] = media_bytes
         stats["amz_sent_to_dealspouch"] += 1
         return
 
-    log.info(f"[EXTRAPE] ⏭️ No recognisable link in reply — ignored")
+    log.info(f"[EXTRAPE] ⏭️ No recognisable link — ignored")
     stats["ignored"] += 1
 
 # ══════════════════════════════════════════
 #  STEP 3: Dealspouch → TG + WA bulk
-#  (Amazon deals only reach here)
 # ══════════════════════════════════════════
 @client.on(events.NewMessage(chats=DEALSPOUCH_BOT))
 async def handle_dealspouch(event):
