@@ -21,7 +21,7 @@ EXTRAPE_BOT    = "@ExtraPeBot"
 DEALSPOUCH_BOT = "@dealspouch_server_bot"
 MY_TG_GROUP    = "@finnindeals2"
 
-# FK deals go to this ONE WA group only
+# FK deals → this ONE WA group only
 FK_WA_GROUP = "120363427339438586@g.us"
 
 SOURCE_GROUPS = [
@@ -41,8 +41,8 @@ def get_ist_now():
 def is_quiet_hours():
     now = get_ist_now()
     current_minutes = now.hour * 60 + now.minute
-    quiet_start = 0 * 60 + 30   # 00:30 IST
-    quiet_end   = 8 * 60 + 0    # 08:00 IST
+    quiet_start = 0 * 60 + 30
+    quiet_end   = 8 * 60 + 0
     return quiet_start <= current_minutes < quiet_end
 
 # ══════════════════════════════════════════
@@ -204,7 +204,10 @@ async def handle_source(event):
     link_type = "Amazon" if amz_links else "Flipkart"
     log.info(f"[SOURCE] 🎯 {link_type} Deal #{stats['deals_found']} found!")
 
+    # Download original image from source group message
     media_bytes = await download_media_bytes(event.message)
+    log.info(f"[SOURCE] 🖼️ Image from source: {'yes' if media_bytes else 'no'}")
+
     temp_key = int(asyncio.get_event_loop().time() * 1000)
     pending_media[temp_key] = media_bytes
 
@@ -222,7 +225,9 @@ async def handle_source(event):
 @client.on(events.NewMessage(chats=EXTRAPE_BOT))
 async def handle_extrape(event):
     global last_extrape_handled
-    text = event.message.text or ""
+
+    # Accept text OR caption (ExtraPe sometimes sends image+caption)
+    text = event.message.text or event.message.caption or ""
     if not text:
         return
 
@@ -233,17 +238,24 @@ async def handle_extrape(event):
         return
     last_extrape_handled = now
 
+    # Get original source image stored in pending_media
     media_bytes = None
     if pending_media:
         oldest_key = next(iter(pending_media))
         media_bytes = pending_media.pop(oldest_key)
+
+    # If no source image, try to download from ExtraPe reply itself
+    if not media_bytes:
+        media_bytes = await download_media_bytes(event.message)
+        if media_bytes:
+            log.info(f"[EXTRAPE] 🖼️ Using image from ExtraPe reply")
 
     ist_now = get_ist_now()
 
     # ── Flipkart detected → single WA group ──
     fk_links = extract_flipkart_links(text)
     if fk_links:
-        log.info(f"[EXTRAPE] 🛒 FK link → sending to 1 WA group only")
+        log.info(f"[EXTRAPE] 🛒 FK link → 1 WA group | image={'yes' if media_bytes else 'no'}")
         if is_quiet_hours():
             log.info(f"[WA-SINGLE] 🌙 Quiet hours ({ist_now.strftime('%H:%M')} IST) — skipping")
             stats["ignored"] += 1
@@ -254,7 +266,7 @@ async def handle_extrape(event):
     # ── Amazon detected → Dealspouch pipeline ──
     amz_links = extract_amazon_links(text)
     if amz_links:
-        log.info(f"[EXTRAPE] ✅ AMZ link → sending to Dealspouch")
+        log.info(f"[EXTRAPE] ✅ AMZ link → Dealspouch | image={'yes' if media_bytes else 'no'}")
         sent = await client.send_message(DEALSPOUCH_BOT, text)
         pending_media[sent.id] = media_bytes
         stats["amz_sent_to_dealspouch"] += 1
@@ -270,7 +282,7 @@ async def handle_extrape(event):
 @client.on(events.NewMessage(chats=DEALSPOUCH_BOT))
 async def handle_dealspouch(event):
     global last_dealspouch_handled
-    text = event.message.text or ""
+    text = event.message.text or event.message.caption or ""
 
     if not has_dealspouch_link(text):
         stats["ignored"] += 1
@@ -290,7 +302,7 @@ async def handle_dealspouch(event):
         media_bytes = pending_media.pop(oldest_key)
 
     ist_now = get_ist_now()
-    log.info(f"[DEALSPOUCH] ✅ Valid! IST: {ist_now.strftime('%H:%M')} | Quiet={is_quiet_hours()}")
+    log.info(f"[DEALSPOUCH] ✅ Valid! IST: {ist_now.strftime('%H:%M')} | image={'yes' if media_bytes else 'no'}")
 
     # Always post to Telegram
     try:
@@ -319,10 +331,10 @@ async def run():
             me = await client.get_me()
             log.info(f"✅ Logged in as: {me.first_name} (@{me.username})")
             log.info(f"👂 Watching {len(SOURCE_GROUPS)} source group(s)")
-            log.info(f"🤖 ExtraPe Bot   : {EXTRAPE_BOT}  ← handles Amazon + Flipkart")
+            log.info(f"🤖 ExtraPe Bot   : {EXTRAPE_BOT}  ← Amazon + Flipkart")
             log.info(f"🤖 Dealspouch Bot: {DEALSPOUCH_BOT}  ← Amazon only")
             log.info(f"📢 TG Group      : {MY_TG_GROUP}")
-            log.info(f"📲 FK WA Group   : {FK_WA_GROUP}  ← Flipkart → 1 group")
+            log.info(f"📲 FK WA Group   : {FK_WA_GROUP}  ← Flipkart 1 group")
             log.info(f"📲 WA Sender     : {BAILEYS_URL or 'NOT SET'}")
             log.info("⏳ Waiting for deals...\n")
             await client.run_until_disconnected()
