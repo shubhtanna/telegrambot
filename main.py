@@ -3,7 +3,7 @@ from telethon.sessions import StringSession
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
-import asyncio, re, io, logging, time, aiohttp, os, threading, pytz
+import asyncio, re, io, logging, time, aiohttp, os, threading, pytz, collections
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -263,24 +263,33 @@ stats = {
 # ══════════════════════════════════════════
 #  SHARED STATE
 #
-#  pending_media      : { sent_msg_id → image_bytes | None }
-#  sent_links_store   : { sent_msg_id → {"links": set, "is_cc": bool} }
-#  sent_original_text : { sent_msg_id → original_text }
+#  pending_media          : { sent_msg_id → image_bytes | None }
+#                           Keyed by message ID sent to ExtraPe.
+#                           ExtraPe replies_to that ID → exact match.
 #
-#  KEY FIX: All three dicts are keyed by the message ID we sent to ExtraPe.
-#  When ExtraPe replies, it replies_to that same message ID, so we can
-#  look up the EXACT media/metadata for that deal — no more mismatches!
+#  sent_links_store       : { sent_msg_id → {"links": set, "is_cc": bool} }
+#  sent_original_text     : { sent_msg_id → original_text }
+#
+#  dealspouch_media_queue : collections.deque of image_bytes|None
+#                           FIFO queue — Dealspouch does NOT use reply_to,
+#                           it sends fresh messages in the same order we sent.
+#                           So we match by arrival order (FIFO), not by ID.
+#                           One entry pushed per message sent to Dealspouch.
 # ══════════════════════════════════════════
-pending_media      = {}
-sent_links_store   = {}
-sent_original_text = {}
+pending_media          = {}
+sent_links_store       = {}
+sent_original_text     = {}
+dealspouch_media_queue = collections.deque()  # ← FIFO: solves Dealspouch image mismatch
 
 client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
 
-last_extrape_handled    = 0
 last_dealspouch_handled = 0
-EXTRAPE_COOLDOWN    = 15
 DEALSPOUCH_COOLDOWN = 15
+
+# Content-hash dedup set for ExtraPe replies — replaces time-based cooldown.
+# Stores hash(text) of each converted reply so exact duplicates are skipped,
+# without blocking valid back-to-back deals that arrive close together.
+extrape_seen_hashes = set()
 
 # ══════════════════════════════════════════
 #  LINK DETECTORS
@@ -502,8 +511,6 @@ async def handle_source(event):
 # ══════════════════════════════════════════
 @client.on(events.NewMessage(chats=EXTRAPE_BOT))
 async def handle_extrape(event):
-    global last_extrape_handled
-
     text = event.message.text or event.message.caption or ""
     if not text:
         return
@@ -539,35 +546,47 @@ async def handle_extrape(event):
     if is_echo_of_sent(text):
         return
 
-    now = time.time()
-    if now - last_extrape_handled < EXTRAPE_COOLDOWN:
+    # ── Dedup by content hash — prevents true duplicate messages only ──
+    msg_hash = hash(text.strip())
+    if msg_hash in extrape_seen_hashes:
         stats["ignored"] += 1
-        log.info("[EXTRAPE] ⏭️ Duplicate ignored")
+        log.info("[EXTRAPE] ⏭️ Exact duplicate content — ignored")
         return
-    last_extrape_handled = now
+    extrape_seen_hashes.add(msg_hash)
+    if len(extrape_seen_hashes) > 50:
+        extrape_seen_hashes.pop()
 
     # ══════════════════════════════════════════
     #  FETCH MEDIA + CC FLAG — matched by reply_to_id
-    #  This is the core fix: we look up the specific deal
-    #  that ExtraPe is replying to, not just the "oldest" one.
+    #
+    #  CRITICAL: pending_is_cc MUST come only from the matched deal's
+    #  sent_links_store entry. We must NEVER fall back to reading
+    #  is_cc from an unrelated old entry — that's what caused the
+    #  trolley bag deal to be routed to CC group (a stale CC entry
+    #  in sent_links_store was read when reply_to match failed).
+    #
+    #  Rule: if we can't match reply_to_id → pending_is_cc = False.
+    #  We still use is_cc_deal(text) as a second check on the
+    #  converted reply text itself, which is always reliable.
     # ══════════════════════════════════════════
     media_bytes    = None
-    pending_is_cc  = False
+    pending_is_cc  = False   # default ALWAYS False — only set True on exact match
 
     if replied_to_id and replied_to_id in pending_media:
-        # ✅ Exact match — use this deal's media and metadata
+        # ✅ Exact match — use this deal's media and CC flag
         media_bytes   = pending_media.get(replied_to_id)
         pending_is_cc = sent_links_store.get(replied_to_id, {}).get("is_cc", False)
         _cleanup_store(replied_to_id)
-        log.info(f"[EXTRAPE] ✅ Matched deal media by reply_to_id={replied_to_id} | image={'yes' if media_bytes else 'no'}")
+        log.info(f"[EXTRAPE] ✅ Matched by reply_to_id={replied_to_id} | cc={pending_is_cc} | image={'yes' if media_bytes else 'no'}")
     else:
-        # ⚠️ Fallback — ExtraPe didn't reply_to (rare), pop oldest
-        log.warning("[EXTRAPE] ⚠️ No reply_to match — falling back to oldest pending deal")
+        # ⚠️ No reply_to match — pop oldest media but DO NOT inherit is_cc flag.
+        # pending_is_cc stays False — we rely solely on is_cc_deal(text) below.
+        log.warning("[EXTRAPE] ⚠️ No reply_to match — popping oldest media only (is_cc stays False)")
         if pending_media:
-            oldest_key    = next(iter(pending_media))
-            media_bytes   = pending_media.get(oldest_key)
-            pending_is_cc = sent_links_store.get(oldest_key, {}).get("is_cc", False)
+            oldest_key  = next(iter(pending_media))
+            media_bytes = pending_media.get(oldest_key)
             _cleanup_store(oldest_key)
+            # ✅ Do NOT read is_cc from oldest_key — it may be a different deal!
 
     # ── Fallback: try ExtraPe reply's own image ──
     if not media_bytes:
@@ -580,6 +599,9 @@ async def handle_extrape(event):
     ist_now = get_ist_now()
 
     # ── CC deal → CC WA group ──
+    # pending_is_cc = True  → deal was flagged CC when sent to ExtraPe (exact match)
+    # is_cc_deal(text) = True → converted reply text itself looks like CC deal
+    # Both checks are safe: FP guard in is_cc_deal() blocks Amazon/FK links
     if pending_is_cc or is_cc_deal(text):
         log.info(f"[EXTRAPE] 💳 CC deal → CC WA group | image={'yes' if media_bytes else 'no'}")
         if is_quiet_hours():
@@ -604,9 +626,14 @@ async def handle_extrape(event):
     # ── Amazon → Dealspouch ──
     if extract_amazon_links(text):
         log.info(f"[EXTRAPE] ✅ AMZ converted → Dealspouch | image={'yes' if media_bytes else 'no'}")
-        sent = await client.send_message(DEALSPOUCH_BOT, text)
-        # Store media keyed by Dealspouch message ID for Step 3
-        pending_media[sent.id] = media_bytes
+        await client.send_message(DEALSPOUCH_BOT, text)
+        # ✅ Push image to FIFO queue — Dealspouch replies in same order we send,
+        #    but does NOT use reply_to, so we match by order not by message ID.
+        #    This prevents iPhone image showing for kitchen deal (or any mismatch).
+        dealspouch_media_queue.append(media_bytes)
+        if len(dealspouch_media_queue) > 20:          # keep bounded
+            dealspouch_media_queue.popleft()
+        log.info(f"[DEALSPOUCH-QUEUE] 📥 Queued image — queue size: {len(dealspouch_media_queue)}")
         stats["amz_sent_to_dealspouch"] += 1
         return
 
@@ -615,7 +642,14 @@ async def handle_extrape(event):
 
 # ══════════════════════════════════════════
 #  STEP 3: Dealspouch → TG + WA bulk
-#  (Amazon only — unchanged)
+#  (Amazon only)
+#
+#  WHY FIFO QUEUE:
+#  Dealspouch bot does NOT reply_to our message — it sends a brand new message.
+#  So we cannot match by reply_to_msg_id. Instead we rely on ORDER:
+#  Dealspouch always replies in the same order we sent deals to it.
+#  We push images into dealspouch_media_queue when sending to Dealspouch,
+#  and popleft() here — guaranteed correct image for each deal.
 # ══════════════════════════════════════════
 @client.on(events.NewMessage(chats=DEALSPOUCH_BOT))
 async def handle_dealspouch(event):
@@ -634,19 +668,13 @@ async def handle_dealspouch(event):
         return
     last_dealspouch_handled = now
 
-    # Dealspouch also replies_to the message we sent it — use same matching pattern
-    replied_to_id = None
-    if event.message.reply_to and event.message.reply_to.reply_to_msg_id:
-        replied_to_id = event.message.reply_to.reply_to_msg_id
-
+    # ✅ Pop from FIFO queue — exact image for this deal, in order
     media_bytes = None
-    if replied_to_id and replied_to_id in pending_media:
-        media_bytes = pending_media.pop(replied_to_id)
-        log.info(f"[DEALSPOUCH] ✅ Matched media by reply_to_id={replied_to_id}")
-    elif pending_media:
-        oldest_key  = next(iter(pending_media))
-        media_bytes = pending_media.pop(oldest_key)
-        log.warning("[DEALSPOUCH] ⚠️ Fallback to oldest pending media")
+    if dealspouch_media_queue:
+        media_bytes = dealspouch_media_queue.popleft()
+        log.info(f"[DEALSPOUCH] ✅ Popped image from queue | image={'yes' if media_bytes else 'no'} | remaining={len(dealspouch_media_queue)}")
+    else:
+        log.warning("[DEALSPOUCH] ⚠️ Queue empty — no image for this deal (sending text only)")
 
     ist_now = get_ist_now()
     log.info(f"[DEALSPOUCH] ✅ Valid! IST: {ist_now.strftime('%H:%M')} | image={'yes' if media_bytes else 'no'}")
