@@ -25,7 +25,7 @@ MY_TG_GROUP    = "@finnindeals2"
 # FK deals → this ONE WA group only
 FK_WA_GROUP = "120363427339438586@g.us"
 
-# CC deals → this WA group (replace with real ID when ready)
+# CC deals → this WA group
 CC_WA_GROUP = "120363426468421381@g.us"
 
 # This source group sends CC deals DIRECTLY — no bot conversion needed
@@ -36,14 +36,12 @@ SOURCE_GROUPS = [
     -1001412868909,
     -1001389782464,
     -1001480964161,
-    CC_DIRECT_GROUP,          # ← added CC direct group
+    CC_DIRECT_GROUP,
 ]
 
 # ══════════════════════════════════════════
 #  CC DEAL DETECTION
 # ══════════════════════════════════════════
-
-# Short-link domains used in CC deals
 CC_SHORT_LINK_PATTERNS = re.compile(
     r'https?://(?:'
     r'bilty\.co|'
@@ -57,7 +55,6 @@ CC_SHORT_LINK_PATTERNS = re.compile(
     re.IGNORECASE
 )
 
-# Keywords that strongly indicate a CC deal post
 CC_KEYWORDS = re.compile(
     r'\b('
     r'credit card|'
@@ -83,20 +80,13 @@ CC_KEYWORDS = re.compile(
 )
 
 def is_cc_deal(text):
-    """
-    Returns True if text looks like a credit card offer.
-    Requires BOTH a short link AND at least one CC keyword,
-    OR a strong keyword match alone (≥2 keyword hits).
-    """
     if not text:
         return False
-
     has_short_link = bool(CC_SHORT_LINK_PATTERNS.search(text))
     keyword_hits   = len(CC_KEYWORDS.findall(text))
-
     if has_short_link and keyword_hits >= 1:
         return True
-    if keyword_hits >= 2:          # Strong keyword signal even without known short link
+    if keyword_hits >= 2:
         return True
     return False
 
@@ -152,12 +142,18 @@ stats = {
 
 # ══════════════════════════════════════════
 #  SHARED STATE
+#
+#  pending_media      : { sent_msg_id → image_bytes | None }
+#  sent_links_store   : { sent_msg_id → {"links": set, "is_cc": bool} }
+#  sent_original_text : { sent_msg_id → original_text }
+#
+#  KEY FIX: All three dicts are keyed by the message ID we sent to ExtraPe.
+#  When ExtraPe replies, it replies_to that same message ID, so we can
+#  look up the EXACT media/metadata for that deal — no more mismatches!
 # ══════════════════════════════════════════
-pending_media = {}
-
-# Store original links we sent to ExtraPe so we can detect echoes
-# { sent_message_id: {"links": set, "is_cc": bool} }
-sent_links_store = {}
+pending_media      = {}
+sent_links_store   = {}
+sent_original_text = {}
 
 client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
 
@@ -167,7 +163,7 @@ EXTRAPE_COOLDOWN    = 15
 DEALSPOUCH_COOLDOWN = 15
 
 # ══════════════════════════════════════════
-#  LINK DETECTORS (Amazon / Flipkart)
+#  LINK DETECTORS
 # ══════════════════════════════════════════
 def extract_amazon_links(text):
     if not text:
@@ -194,22 +190,14 @@ def has_dealspouch_link(text):
     return text and "amaz.dealspouch.com" in text
 
 def is_extrape_failure(text):
-    """
-    Returns True if ExtraPe could not convert the link.
-    ExtraPe's failure message: "We will not be able to convert these Links: ..."
-    """
     if not text:
         return False
     return "will not be able to convert" in text.lower()
 
-# Store original full message text we sent to ExtraPe
-# { sent_message_id: original_text }
-sent_original_text = {}
-
 def is_echo_of_sent(text):
     """
-    Returns True if the links in ExtraPe's reply are the SAME as what we sent.
-    This means ExtraPe is echoing our input, not sending the converted reply.
+    Returns True if ExtraPe is just echoing our original input back.
+    We detect this by checking if the reply's links overlap with what we sent.
     """
     if not sent_links_store:
         return False
@@ -219,19 +207,26 @@ def is_echo_of_sent(text):
     for entry in sent_links_store.values():
         original_links = entry["links"]
         if reply_links & original_links:
-            log.info(f"[EXTRAPE] 🔄 Echo detected — same links as sent. Waiting for converted reply...")
+            log.info("[EXTRAPE] 🔄 Echo detected — same links as sent. Waiting for converted reply...")
             return True
     return False
 
-def get_pending_is_cc():
-    """
-    Check if the oldest pending ExtraPe request was a CC deal.
-    Returns True if it was CC, False otherwise.
-    """
-    if not sent_links_store:
-        return False
-    oldest_key = next(iter(sent_links_store))
-    return sent_links_store[oldest_key].get("is_cc", False)
+def _cleanup_store(msg_id):
+    """Remove a deal's state from all tracking dicts."""
+    pending_media.pop(msg_id, None)
+    sent_links_store.pop(msg_id, None)
+    sent_original_text.pop(msg_id, None)
+
+def _store_deal(sent_msg_id, media_bytes, original_links, is_cc, original_text):
+    """Save deal state keyed by the message ID we sent to ExtraPe."""
+    pending_media[sent_msg_id]      = media_bytes
+    sent_links_store[sent_msg_id]   = {"links": original_links, "is_cc": is_cc}
+    sent_original_text[sent_msg_id] = original_text
+
+    # Keep stores bounded
+    if len(sent_links_store) > 20:
+        oldest = next(iter(sent_links_store))
+        _cleanup_store(oldest)
 
 # ══════════════════════════════════════════
 #  MEDIA DOWNLOADER
@@ -249,7 +244,6 @@ async def download_media_bytes(message):
 # ══════════════════════════════════════════
 #  WHATSAPP SENDERS
 # ══════════════════════════════════════════
-
 async def send_to_whatsapp_bulk(text, image_bytes=None):
     """Send to ALL WA groups (bulk broadcast)."""
     if not BAILEYS_URL:
@@ -312,10 +306,6 @@ async def send_to_whatsapp_single(text, target_group, image_bytes=None):
 
 # ══════════════════════════════════════════
 #  STEP 1: Source groups → Route by deal type
-#
-#  CC_DIRECT_GROUP  → CC deal → send directly to CC WA group
-#  All other groups → CC deal → ExtraPe bot for conversion
-#  All groups       → AMZ/FK  → ExtraPe bot (existing flow)
 # ══════════════════════════════════════════
 @client.on(events.NewMessage(chats=SOURCE_GROUPS))
 async def handle_source(event):
@@ -325,7 +315,6 @@ async def handle_source(event):
     fk_links  = extract_flipkart_links(text)
     cc_deal   = is_cc_deal(text)
 
-    # ── Nothing relevant ──
     if not amz_links and not fk_links and not cc_deal:
         return
 
@@ -334,92 +323,62 @@ async def handle_source(event):
 
     # ══════════════════════════
     #  CC DEAL — DIRECT GROUP
-    #  No bot conversion needed
     # ══════════════════════════
     if cc_deal and chat_id == CC_DIRECT_GROUP:
         log.info(f"[CC-DIRECT] 💳 CC Deal #{stats['deals_found']} from direct group!")
         media_bytes = await download_media_bytes(event.message)
         log.info(f"[CC-DIRECT] 🖼️ Image: {'yes' if media_bytes else 'no'}")
 
-        ist_now = get_ist_now()
         if is_quiet_hours():
-            log.info(f"[CC-DIRECT] 🌙 Quiet hours ({ist_now.strftime('%H:%M')} IST) — skipping")
+            log.info(f"[CC-DIRECT] 🌙 Quiet hours — skipping")
             stats["ignored"] += 1
         else:
             await send_to_whatsapp_single(text, CC_WA_GROUP, media_bytes)
             stats["cc_sent_direct"] += 1
-            log.info(f"[CC-DIRECT] ✅ Sent directly to CC WA group")
+            log.info("[CC-DIRECT] ✅ Sent directly to CC WA group")
         return
 
     # ══════════════════════════
-    #  CC DEAL — OTHER GROUPS
-    #  Send to ExtraPe for link conversion
+    #  CC DEAL — OTHER GROUPS → ExtraPe
     # ══════════════════════════
     if cc_deal and chat_id != CC_DIRECT_GROUP:
         log.info(f"[CC-EXTRAPE] 💳 CC Deal #{stats['deals_found']} from group {chat_id} → ExtraPe")
-        media_bytes = await download_media_bytes(event.message)
-        log.info(f"[CC-EXTRAPE] 🖼️ Image: {'yes' if media_bytes else 'no'}")
-
-        temp_key = int(asyncio.get_event_loop().time() * 1000)
-        pending_media[temp_key] = media_bytes
+        media_bytes    = await download_media_bytes(event.message)
         original_links = extract_all_links(text)
 
         sent = await client.send_message(EXTRAPE_BOT, text)
-        pending_media[sent.id] = pending_media.pop(temp_key)
-
-        # Track this as a CC deal so handle_extrape knows where to route
-        sent_links_store[sent.id] = {"links": original_links, "is_cc": True}
-        sent_original_text[sent.id] = text
-
-        if len(sent_links_store) > 20:
-            oldest = next(iter(sent_links_store))
-            del sent_links_store[oldest]
-            if oldest in sent_original_text:
-                del sent_original_text[oldest]
+        _store_deal(sent.id, media_bytes, original_links, is_cc=True, original_text=text)
 
         stats["sent_to_extrape"] += 1
-        log.info(f"[CC-EXTRAPE] 📤 Sent to ExtraPe (CC=True, tracking {len(original_links)} link(s))")
+        log.info(f"[CC-EXTRAPE] 📤 Sent to ExtraPe (CC=True, msg_id={sent.id})")
         return
 
     # ══════════════════════════
-    #  AMAZON / FLIPKART DEALS
-    #  Existing flow unchanged
+    #  AMAZON / FLIPKART → ExtraPe
     # ══════════════════════════
     link_type = "Amazon" if amz_links else "Flipkart"
     log.info(f"[SOURCE] 🎯 {link_type} Deal #{stats['deals_found']} found!")
 
-    media_bytes = await download_media_bytes(event.message)
-    log.info(f"[SOURCE] 🖼️ Image: {'yes' if media_bytes else 'no'}")
-
-    temp_key = int(asyncio.get_event_loop().time() * 1000)
-    pending_media[temp_key] = media_bytes
+    media_bytes    = await download_media_bytes(event.message)
     original_links = extract_all_links(text)
 
     sent = await client.send_message(EXTRAPE_BOT, text)
-    pending_media[sent.id] = pending_media.pop(temp_key)
-
-    sent_links_store[sent.id] = {"links": original_links, "is_cc": False}
-    sent_original_text[sent.id] = text
-
-    if len(sent_links_store) > 20:
-        oldest = next(iter(sent_links_store))
-        del sent_links_store[oldest]
-        if oldest in sent_original_text:
-            del sent_original_text[oldest]
+    _store_deal(sent.id, media_bytes, original_links, is_cc=False, original_text=text)
 
     stats["sent_to_extrape"] += 1
-    log.info(f"[EXTRAPE] 📤 Sent to ExtraPe (CC=False, tracking {len(original_links)} original link(s))")
+    log.info(f"[EXTRAPE] 📤 Sent to ExtraPe (CC=False, msg_id={sent.id})")
 
 # ══════════════════════════════════════════
-#  STEP 2: ExtraPe reply → route by deal type
+#  STEP 2: ExtraPe reply → match by reply_to_msg_id
 #
-#  ExtraPe sends 2 messages:
-#    Message 1 — echo of original input  → SKIP (same links we sent)
-#    Message 2 — converted links + image → USE THIS
+#  THE KEY FIX:
+#  ExtraPe always replies_to the message we sent it.
+#  We use that reply_to_msg_id to look up the EXACT media/metadata
+#  for that specific deal — completely eliminating image mismatches.
 #
-#  If pending deal was CC  → send to CC WA group
-#  If Flipkart             → send to FK WA group
-#  If Amazon               → send to Dealspouch
+#  ExtraPe sends 2 messages per deal:
+#    Message 1 — echo of our input  → detected by is_echo_of_sent() → SKIP
+#    Message 2 — converted links    → USE THIS
 # ══════════════════════════════════════════
 @client.on(events.NewMessage(chats=EXTRAPE_BOT))
 async def handle_extrape(event):
@@ -429,66 +388,80 @@ async def handle_extrape(event):
     if not text:
         return
 
-    # ── ExtraPe couldn't convert → forward original to EarnKaro ──
+    # ── Resolve which original deal this reply belongs to ──
+    replied_to_id = None
+    if event.message.reply_to and event.message.reply_to.reply_to_msg_id:
+        replied_to_id = event.message.reply_to.reply_to_msg_id
+        log.info(f"[EXTRAPE] 🔗 Reply to msg_id={replied_to_id}")
+
+    # ── ExtraPe failure → forward original to EarnKaro ──
     if is_extrape_failure(text):
-        log.info(f"[EXTRAPE] ❌ Conversion failed — forwarding original to EarnKaro")
-
-        # Get the original text we sent to ExtraPe
+        log.info("[EXTRAPE] ❌ Conversion failed — forwarding original to EarnKaro")
         original_text = None
-        if sent_original_text:
+        if replied_to_id and replied_to_id in sent_original_text:
+            original_text = sent_original_text.get(replied_to_id)
+            _cleanup_store(replied_to_id)
+        elif sent_original_text:
+            # Fallback: grab oldest
             oldest_key = next(iter(sent_original_text))
-            original_text = sent_original_text.pop(oldest_key)
-
-        # Clean up state
-        sent_links_store.clear()
-        if pending_media:
-            oldest_key = next(iter(pending_media))
-            pending_media.pop(oldest_key)
+            original_text = sent_original_text.get(oldest_key)
+            _cleanup_store(oldest_key)
 
         if original_text:
             await client.send_message(EARNKARO_BOT, original_text)
-            log.info(f"[EARNKARO] 📤 Forwarded original deal to EarnKaro bot — done, no WA/TG")
-            stats["ignored"] += 1   # not sent to WA, just forwarded for manual handling
+            log.info("[EARNKARO] 📤 Forwarded original deal to EarnKaro")
+            stats["ignored"] += 1
         else:
-            log.warning(f"[EARNKARO] ⚠️ No original text found to forward")
+            log.warning("[EARNKARO] ⚠️ No original text found to forward")
         return
 
-    # ── Skip if ExtraPe is echoing our original input ──
+    # ── Skip echo of our own input ──
     if is_echo_of_sent(text):
         return
 
     now = time.time()
     if now - last_extrape_handled < EXTRAPE_COOLDOWN:
         stats["ignored"] += 1
-        log.info(f"[EXTRAPE] ⏭️ Duplicate ignored")
+        log.info("[EXTRAPE] ⏭️ Duplicate ignored")
         return
     last_extrape_handled = now
 
-    # Was this a CC deal we sent?
-    pending_is_cc = get_pending_is_cc()
+    # ══════════════════════════════════════════
+    #  FETCH MEDIA + CC FLAG — matched by reply_to_id
+    #  This is the core fix: we look up the specific deal
+    #  that ExtraPe is replying to, not just the "oldest" one.
+    # ══════════════════════════════════════════
+    media_bytes    = None
+    pending_is_cc  = False
 
-    # Clear sent_links_store since we got the converted reply
-    sent_links_store.clear()
-    sent_original_text.clear()
+    if replied_to_id and replied_to_id in pending_media:
+        # ✅ Exact match — use this deal's media and metadata
+        media_bytes   = pending_media.get(replied_to_id)
+        pending_is_cc = sent_links_store.get(replied_to_id, {}).get("is_cc", False)
+        _cleanup_store(replied_to_id)
+        log.info(f"[EXTRAPE] ✅ Matched deal media by reply_to_id={replied_to_id} | image={'yes' if media_bytes else 'no'}")
+    else:
+        # ⚠️ Fallback — ExtraPe didn't reply_to (rare), pop oldest
+        log.warning("[EXTRAPE] ⚠️ No reply_to match — falling back to oldest pending deal")
+        if pending_media:
+            oldest_key    = next(iter(pending_media))
+            media_bytes   = pending_media.get(oldest_key)
+            pending_is_cc = sent_links_store.get(oldest_key, {}).get("is_cc", False)
+            _cleanup_store(oldest_key)
 
-    # Get source image
-    media_bytes = None
-    if pending_media:
-        oldest_key = next(iter(pending_media))
-        media_bytes = pending_media.pop(oldest_key)
-
-    # Fallback — try ExtraPe reply image
+    # ── Fallback: try ExtraPe reply's own image ──
     if not media_bytes:
         media_bytes = await download_media_bytes(event.message)
         if media_bytes:
-            log.info(f"[EXTRAPE] 🖼️ Using image from ExtraPe reply")
+            log.info("[EXTRAPE] 🖼️ No source image — using ExtraPe reply image as fallback")
+        else:
+            log.info("[EXTRAPE] 🖼️ No image available for this deal")
 
     ist_now = get_ist_now()
 
-    # ── CC deal from other groups → CC WA group ──
-    # Check both: was it flagged as CC when sent, AND does reply still look like CC
+    # ── CC deal → CC WA group ──
     if pending_is_cc or is_cc_deal(text):
-        log.info(f"[EXTRAPE] 💳 CC deal reply → CC WA group | image={'yes' if media_bytes else 'no'}")
+        log.info(f"[EXTRAPE] 💳 CC deal → CC WA group | image={'yes' if media_bytes else 'no'}")
         if is_quiet_hours():
             log.info(f"[WA-SINGLE] 🌙 Quiet hours ({ist_now.strftime('%H:%M')} IST) — skipping CC")
             stats["ignored"] += 1
@@ -498,8 +471,7 @@ async def handle_extrape(event):
         return
 
     # ── Flipkart → FK WA group ──
-    fk_links = extract_flipkart_links(text)
-    if fk_links:
+    if extract_flipkart_links(text):
         log.info(f"[EXTRAPE] 🛒 FK converted → FK WA group | image={'yes' if media_bytes else 'no'}")
         if is_quiet_hours():
             log.info(f"[WA-SINGLE] 🌙 Quiet hours ({ist_now.strftime('%H:%M')} IST) — skipping FK")
@@ -510,15 +482,15 @@ async def handle_extrape(event):
         return
 
     # ── Amazon → Dealspouch ──
-    amz_links = extract_amazon_links(text)
-    if amz_links:
+    if extract_amazon_links(text):
         log.info(f"[EXTRAPE] ✅ AMZ converted → Dealspouch | image={'yes' if media_bytes else 'no'}")
         sent = await client.send_message(DEALSPOUCH_BOT, text)
+        # Store media keyed by Dealspouch message ID for Step 3
         pending_media[sent.id] = media_bytes
         stats["amz_sent_to_dealspouch"] += 1
         return
 
-    log.info(f"[EXTRAPE] ⏭️ No recognisable link in reply — ignored")
+    log.info("[EXTRAPE] ⏭️ No recognisable link in reply — ignored")
     stats["ignored"] += 1
 
 # ══════════════════════════════════════════
@@ -532,20 +504,29 @@ async def handle_dealspouch(event):
 
     if not has_dealspouch_link(text):
         stats["ignored"] += 1
-        log.info(f"[DEALSPOUCH] ⏭️ Ignored — no dealspouch link")
+        log.info("[DEALSPOUCH] ⏭️ Ignored — no dealspouch link")
         return
 
     now = time.time()
     if now - last_dealspouch_handled < DEALSPOUCH_COOLDOWN:
         stats["ignored"] += 1
-        log.info(f"[DEALSPOUCH] ⏭️ Duplicate ignored")
+        log.info("[DEALSPOUCH] ⏭️ Duplicate ignored")
         return
     last_dealspouch_handled = now
 
+    # Dealspouch also replies_to the message we sent it — use same matching pattern
+    replied_to_id = None
+    if event.message.reply_to and event.message.reply_to.reply_to_msg_id:
+        replied_to_id = event.message.reply_to.reply_to_msg_id
+
     media_bytes = None
-    if pending_media:
-        oldest_key = next(iter(pending_media))
+    if replied_to_id and replied_to_id in pending_media:
+        media_bytes = pending_media.pop(replied_to_id)
+        log.info(f"[DEALSPOUCH] ✅ Matched media by reply_to_id={replied_to_id}")
+    elif pending_media:
+        oldest_key  = next(iter(pending_media))
         media_bytes = pending_media.pop(oldest_key)
+        log.warning("[DEALSPOUCH] ⚠️ Fallback to oldest pending media")
 
     ist_now = get_ist_now()
     log.info(f"[DEALSPOUCH] ✅ Valid! IST: {ist_now.strftime('%H:%M')} | image={'yes' if media_bytes else 'no'}")
