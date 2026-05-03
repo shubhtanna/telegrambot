@@ -40,54 +40,174 @@ SOURCE_GROUPS = [
 ]
 
 # ══════════════════════════════════════════
-#  CC DEAL DETECTION
+#  CC DEAL DETECTION  (v2 — smart multi-signal)
+#
+#  A message is a CC deal ONLY when it is clearly about
+#  applying for / getting a credit card — NOT just a product
+#  deal that mentions "cashback" or "bank offer".
+#
+#  Logic:
+#    HARD BLOCK  → always false  (amazon/flipkart product buy links)
+#    STRONG HIT  → any 1 strong keyword alone → true
+#    BANK + WEAK → bank name  + ≥1 weak CC keyword → true
+#    SHORT + WEAK→ CC short link + ≥1 weak CC keyword → true
+#    else        → false
 # ══════════════════════════════════════════
+
+# Short-link domains used by CC affiliate programmes
 CC_SHORT_LINK_PATTERNS = re.compile(
     r'https?://(?:'
     r'bilty\.co|'
     r'extp\.in|'
-    r'bit\.ly|'
-    r'tinyurl\.com|'
     r'clnk\.in|'
     r'isl\.co|'
-    r'go\.onelink\.me'
+    r'go\.onelink\.me|'
+    r'onelink\.me'
     r')/\S+',
     re.IGNORECASE
 )
 
-CC_KEYWORDS = re.compile(
+# ── STRONG signals — these alone confirm a CC deal ──
+# (card-apply / card-offer language, never used for product deals)
+CC_STRONG_KEYWORDS = re.compile(
     r'\b('
     r'credit card|'
-    r'lifetime free|'
-    r'joining fee|'
-    r'annual fee|'
-    r'cashback|'
-    r'rupay|'
-    r'rupay card|'
+    r'debit card|'
+    r'lifetime free(?: card)?|'
+    r'joining fee(?: waived)?|'
+    r'annual fee(?: waived| nil| zero)?|'
     r'lounge access|'
     r'airport lounge|'
-    r'credit score|'
-    r'popcoins|'
-    r'upi payment|'
+    r'fuel surcharge(?: waiver)?|'
+    r'milestone benefit|'
+    r'welcome bonus|'
     r'welcome voucher|'
-    r'fuel surcharge|'
-    r'reward points|'
-    r'apply now|'
-    r'apply here|'
-    r'apply in'
+    r'welcome gift|'
+    r'card apply|'
+    r'apply (?:for )?(?:the )?card|'
+    r'rupay (?:credit |platinum |select )?card|'
+    r'visa (?:credit |platinum |signature )?card|'
+    r'mastercard|'
+    r'credit score(?: check| free)?|'
+    r'popcoins|'
+    r'reward points(?: on card)?'
     r')\b',
     re.IGNORECASE
 )
 
-def is_cc_deal(text):
+# ── WEAK signals — only meaningful alongside a bank name or CC short link ──
+CC_WEAK_KEYWORDS = re.compile(
+    r'\b('
+    r'apply now|'
+    r'apply here|'
+    r'apply(?: in| online)?|'
+    r'cashback(?: card| offer)?|'
+    r'upi(?: payment| cashback| offer)?|'
+    r'zero fee|'
+    r'no fee|'
+    r'free card|'
+    r'card offer|'
+    r'card benefit|'
+    r'card perks?|'
+    r'card limit|'
+    r'eligib(?:le|ility)|'
+    r'instant approval|'
+    r'pre-?approved|'
+    r'card (?:launch|deal|offer)'
+    r')\b',
+    re.IGNORECASE
+)
+
+# ── All major Indian banks & NBFCs that issue credit cards ──
+BANK_NAMES = re.compile(
+    r'\b('
+    r'hdfc(?: bank)?|'
+    r'sbi(?: card)?|'
+    r'icici(?: bank)?|'
+    r'axis(?: bank)?|'
+    r'kotak(?: bank| mahindra)?|'
+    r'yes bank|'
+    r'idfc(?: first)?|'
+    r'induslnd(?: bank)?|'
+    r'rbl(?: bank)?|'
+    r'au(?: small finance)?(?: bank)?|'
+    r'bob(?: financial)?|'
+    r'bank of baroda|'
+    r'pnb(?: bank)?|'
+    r'punjab national(?: bank)?|'
+    r'canara(?: bank)?|'
+    r'union bank|'
+    r'federal bank|'
+    r'south indian bank|'
+    r'karnataka bank|'
+    r'hsbc|'
+    r'citibank|'
+    r'standard chartered|'
+    r'american express|'
+    r'amex|'
+    r'bajaj finserv|'
+    r'one card|'
+    r'slice(?: card)?|'
+    r'uni card|'
+    r'fi (?:money|card)|'
+    r'niyo(?: card)?|'
+    r'jupiter(?: card)?|'
+    r'scapia|'
+    r'idbi(?: bank)?'
+    r')\b',
+    re.IGNORECASE
+)
+
+# ── FALSE-POSITIVE GUARD ──
+# These patterns signal a plain product/shopping deal — never a CC deal.
+# If matched, is_cc_deal() returns False even if CC keywords are present.
+# e.g. "After Cashback ₹xxx  Buy: amazon.in/..."  →  product cashback offer
+CC_FALSE_POSITIVE = re.compile(
+    r'(?:'
+    r'amazon\.in/(?:dp|gp)|'        # Amazon product link
+    r'amzn\.(?:in|to)|'             # Amazon short link
+    r'flipkart\.com/|'              # Flipkart product link
+    r'fkrt\.\w+|'                   # Flipkart short link
+    r'(?:buy|order|shop)(?: now| here| at)?\s*[:\-]?\s*https?://|'  # "Buy: <link>"
+    r'(?:loot|deal|offer)\s+at\s+₹|'   # "LOOT at ₹xxx"
+    r'after\s+cashback\s+₹|'           # "After Cashback ₹xxx"
+    r'collect\s+cashback\s*[:\-]?\s*https?://'  # "Collect Cashback: <link>"
+    r')',
+    re.IGNORECASE
+)
+
+def is_cc_deal(text: str) -> bool:
+    """
+    Returns True ONLY for genuine credit card apply / card-offer deals.
+    Product deals with cashback/bank-offer language are rejected.
+    """
     if not text:
         return False
-    has_short_link = bool(CC_SHORT_LINK_PATTERNS.search(text))
-    keyword_hits   = len(CC_KEYWORDS.findall(text))
-    if has_short_link and keyword_hits >= 1:
+
+    # ── 1. Hard block — looks like a product shopping deal ──
+    if CC_FALSE_POSITIVE.search(text):
+        log.debug("[CC-DETECT] ❌ False-positive guard triggered — not a CC deal")
+        return False
+
+    # ── 2. Strong keyword alone → definite CC deal ──
+    if CC_STRONG_KEYWORDS.search(text):
+        log.debug("[CC-DETECT] ✅ Strong CC keyword matched")
         return True
-    if keyword_hits >= 2:
+
+    # ── 3. Bank name + weak CC keyword → CC deal ──
+    has_bank = bool(BANK_NAMES.search(text))
+    has_weak = bool(CC_WEAK_KEYWORDS.search(text))
+    has_cc_link = bool(CC_SHORT_LINK_PATTERNS.search(text))
+
+    if has_bank and has_weak:
+        log.debug("[CC-DETECT] ✅ Bank name + weak CC keyword matched")
         return True
+
+    # ── 4. CC short link + weak CC keyword → CC deal ──
+    if has_cc_link and has_weak:
+        log.debug("[CC-DETECT] ✅ CC short link + weak CC keyword matched")
+        return True
+
     return False
 
 def extract_cc_short_links(text):
