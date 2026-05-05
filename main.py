@@ -35,7 +35,6 @@ SOURCE_GROUPS = [
     -1001493857075,
     -1001412868909,
     -1001389782464,
-    -1001480964161,
     CC_DIRECT_GROUP,
 ]
 
@@ -55,9 +54,10 @@ SOURCE_GROUPS = [
 # ══════════════════════════════════════════
 
 # Short-link domains used by CC affiliate programmes
+# NOTE: bilty.co is intentionally EXCLUDED here — ExtraPe uses bilty.co
+# for Flipkart conversions too, so it lives in extract_flipkart_links() instead.
 CC_SHORT_LINK_PATTERNS = re.compile(
     r'https?://(?:'
-    r'bilty\.co|'
     r'extp\.in|'
     r'clnk\.in|'
     r'isl\.co|'
@@ -291,6 +291,11 @@ DEALSPOUCH_COOLDOWN = 15
 # without blocking valid back-to-back deals that arrive close together.
 extrape_seen_hashes = set()
 
+# Source-level dedup — same deal text arriving from multiple source groups
+# (common for viral deals forwarded to all groups) should only be sent to
+# ExtraPe ONCE. We hash the text and skip if seen within last 200 entries.
+source_seen_hashes = set()
+
 # ══════════════════════════════════════════
 #  LINK DETECTORS
 # ══════════════════════════════════════════
@@ -305,8 +310,12 @@ def extract_amazon_links(text):
 def extract_flipkart_links(text):
     if not text:
         return []
+    # bilty.co is included here because ExtraPe sometimes converts FK links
+    # to bilty.co short links (confirmed from live screenshots).
+    # bilty.co is intentionally NOT in CC_SHORT_LINK_PATTERNS to avoid
+    # FK deals being routed to the CC WA group.
     return re.findall(
-        r'https?://(?:www\.)?(?:flipkart\.com|fkrt\.\w+|dl\.flipkart\.com)[^\s]*',
+        r'https?://(?:www\.)?(?:flipkart\.com|fkrt\.\w+|dl\.flipkart\.com|bilty\.co)[^\s]*',
         text
     )
 
@@ -356,6 +365,32 @@ def _store_deal(sent_msg_id, media_bytes, original_links, is_cc, original_text):
     if len(sent_links_store) > 20:
         oldest = next(iter(sent_links_store))
         _cleanup_store(oldest)
+
+# ══════════════════════════════════════════
+#  TEXT SANITIZER
+#  Removes fake URL fragments that appear when words like "DealsWait..."
+#  get split across lines and ExtraPe's parser reads them as URLs.
+#  e.g. "DealsWait...\nYou" → ExtraPe sees "https://Wait...You" → failure
+#  We strip any https?:// token whose host part starts with uppercase or
+#  contains ellipsis/dots in a non-domain pattern.
+# ══════════════════════════════════════════
+_FAKE_URL_RE = re.compile(
+    r'https?://(?!'         # starts with http(s)://
+    r'(?:[a-z0-9\-]+\.)+' # but NOT followed by valid lowercase domain
+    r'[a-z]{2,}'            # with valid TLD
+    r')'
+    r'\S*',                # consume rest of token
+    re.IGNORECASE
+)
+
+def sanitize_text_for_bot(text: str) -> str:
+    """Strip fake/broken URL fragments before sending text to ExtraPe/EarnKaro."""
+    if not text:
+        return text
+    cleaned = _FAKE_URL_RE.sub('', text).strip()
+    if cleaned != text:
+        log.info(f"[SANITIZE] Removed fake URL fragments from text")
+    return cleaned
 
 # ══════════════════════════════════════════
 #  MEDIA DOWNLOADER
@@ -447,6 +482,21 @@ async def handle_source(event):
     if not amz_links and not fk_links and not cc_deal:
         return
 
+    # ── Source-level dedup ──────────────────────────────────────────────────
+    # Viral deals get forwarded to ALL source groups simultaneously.
+    # Without this, the same deal is sent to ExtraPe N times (once per group),
+    # and if ExtraPe can't convert it, EarnKaro gets it N times too — causing
+    # the "20x sending" problem seen with the Flipkart BLACK deal.
+    # We hash text and skip if we've already dispatched this deal recently.
+    src_hash = hash(text.strip())
+    if src_hash in source_seen_hashes:
+        log.info("[SOURCE] ⏭️ Duplicate deal text — already dispatched from another group, skipping")
+        return
+    source_seen_hashes.add(src_hash)
+    if len(source_seen_hashes) > 200:
+        source_seen_hashes.pop()
+    # ───────────────────────────────────────────────────────────────────────
+
     stats["deals_found"] += 1
     chat_id = event.chat_id
 
@@ -474,9 +524,10 @@ async def handle_source(event):
         log.info(f"[CC-EXTRAPE] 💳 CC Deal #{stats['deals_found']} from group {chat_id} → ExtraPe")
         media_bytes    = await download_media_bytes(event.message)
         original_links = extract_all_links(text)
+        clean_text     = sanitize_text_for_bot(text)
 
-        sent = await client.send_message(EXTRAPE_BOT, text)
-        _store_deal(sent.id, media_bytes, original_links, is_cc=True, original_text=text)
+        sent = await client.send_message(EXTRAPE_BOT, clean_text)
+        _store_deal(sent.id, media_bytes, original_links, is_cc=True, original_text=clean_text)
 
         stats["sent_to_extrape"] += 1
         log.info(f"[CC-EXTRAPE] 📤 Sent to ExtraPe (CC=True, msg_id={sent.id})")
@@ -490,9 +541,10 @@ async def handle_source(event):
 
     media_bytes    = await download_media_bytes(event.message)
     original_links = extract_all_links(text)
+    clean_text     = sanitize_text_for_bot(text)
 
-    sent = await client.send_message(EXTRAPE_BOT, text)
-    _store_deal(sent.id, media_bytes, original_links, is_cc=False, original_text=text)
+    sent = await client.send_message(EXTRAPE_BOT, clean_text)
+    _store_deal(sent.id, media_bytes, original_links, is_cc=False, original_text=clean_text)
 
     stats["sent_to_extrape"] += 1
     log.info(f"[EXTRAPE] 📤 Sent to ExtraPe (CC=False, msg_id={sent.id})")
