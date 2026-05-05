@@ -35,6 +35,7 @@ SOURCE_GROUPS = [
     -1001493857075,
     -1001412868909,
     -1001389782464,
+    -1001480964161,
     CC_DIRECT_GROUP,
 ]
 
@@ -482,26 +483,15 @@ async def handle_source(event):
     if not amz_links and not fk_links and not cc_deal:
         return
 
-    # ── Source-level dedup ──────────────────────────────────────────────────
-    # Viral deals get forwarded to ALL source groups simultaneously.
-    # Without this, the same deal is sent to ExtraPe N times (once per group),
-    # and if ExtraPe can't convert it, EarnKaro gets it N times too — causing
-    # the "20x sending" problem seen with the Flipkart BLACK deal.
-    # We hash text and skip if we've already dispatched this deal recently.
-    src_hash = hash(text.strip())
-    if src_hash in source_seen_hashes:
-        log.info("[SOURCE] ⏭️ Duplicate deal text — already dispatched from another group, skipping")
-        return
-    source_seen_hashes.add(src_hash)
-    if len(source_seen_hashes) > 200:
-        source_seen_hashes.pop()
-    # ───────────────────────────────────────────────────────────────────────
-
     stats["deals_found"] += 1
     chat_id = event.chat_id
 
     # ══════════════════════════
     #  CC DEAL — DIRECT GROUP
+    #  Always handled first — BEFORE any dedup check.
+    #  Reason: the same CC deal text may arrive from another source group
+    #  first and get hashed into source_seen_hashes. If dedup ran before
+    #  this check, CC_DIRECT_GROUP deals would be silently dropped.
     # ══════════════════════════
     if cc_deal and chat_id == CC_DIRECT_GROUP:
         log.info(f"[CC-DIRECT] 💳 CC Deal #{stats['deals_found']} from direct group!")
@@ -516,6 +506,20 @@ async def handle_source(event):
             stats["cc_sent_direct"] += 1
             log.info("[CC-DIRECT] ✅ Sent directly to CC WA group")
         return
+
+    # ── Source-level dedup (runs AFTER CC_DIRECT_GROUP check above) ─────────
+    # Viral deals get forwarded to ALL source groups simultaneously.
+    # Without this, the same deal is sent to ExtraPe N times (once per group),
+    # and if ExtraPe can't convert it, EarnKaro gets it N times too.
+    # CC_DIRECT_GROUP is intentionally exempt (handled above with early return).
+    src_hash = hash(text.strip())
+    if src_hash in source_seen_hashes:
+        log.info("[SOURCE] ⏭️ Duplicate deal text — already dispatched from another group, skipping")
+        return
+    source_seen_hashes.add(src_hash)
+    if len(source_seen_hashes) > 200:
+        source_seen_hashes.pop()
+    # ─────────────────────────────────────────────────────────────────────────
 
     # ══════════════════════════
     #  CC DEAL — OTHER GROUPS → ExtraPe
