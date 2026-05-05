@@ -292,6 +292,12 @@ DEALSPOUCH_COOLDOWN = 15
 # without blocking valid back-to-back deals that arrive close together.
 extrape_seen_hashes = set()
 
+# Processed reply_to_id tracker — prevents duplicate FK sends when ExtraPe
+# sends multiple converted replies for the same original message.
+# ExtraPe sometimes sends both a bilty.co AND fkrt.cc version of the same FK deal.
+# Both reply to the same msg_id. We process the FIRST one and skip the rest.
+extrape_processed_reply_ids = set()
+
 # Source-level dedup — same deal text arriving from multiple source groups
 # (common for viral deals forwarded to all groups) should only be sent to
 # ExtraPe ONCE. We hash the text and skip if seen within last 200 entries.
@@ -308,13 +314,28 @@ def extract_amazon_links(text):
         text
     )
 
-def extract_flipkart_links(text):
+def extract_flipkart_links_source(text):
+    """
+    Strict FK detector for SOURCE GROUP messages.
+    Only accepts native Flipkart domains — fkrt.cc, flipkart.com.
+    bilty.co from source groups is NOT a FK link (it's used by many stores).
+    bilty.co only counts as FK when it comes from ExtraPe's converted reply.
+    """
     if not text:
         return []
-    # bilty.co is included here because ExtraPe sometimes converts FK links
-    # to bilty.co short links (confirmed from live screenshots).
-    # bilty.co is intentionally NOT in CC_SHORT_LINK_PATTERNS to avoid
-    # FK deals being routed to the CC WA group.
+    return re.findall(
+        r'https?://(?:www\.)?(?:flipkart\.com|fkrt\.\w+|dl\.flipkart\.com)[^\s]*',
+        text
+    )
+
+def extract_flipkart_links(text):
+    """
+    FK detector for EXTRAPE REPLY messages.
+    Includes bilty.co because ExtraPe converts FK links to bilty.co short links.
+    Do NOT use this for source group messages — use extract_flipkart_links_source().
+    """
+    if not text:
+        return []
     return re.findall(
         r'https?://(?:www\.)?(?:flipkart\.com|fkrt\.\w+|dl\.flipkart\.com|bilty\.co)[^\s]*',
         text
@@ -477,7 +498,7 @@ async def handle_source(event):
     text = event.message.text or event.message.caption or ""
 
     amz_links = extract_amazon_links(text)
-    fk_links  = extract_flipkart_links(text)
+    fk_links  = extract_flipkart_links_source(text)  # strict: fkrt.cc/flipkart.com only
     cc_deal   = is_cc_deal(text)
 
     if not amz_links and not fk_links and not cc_deal:
@@ -602,7 +623,15 @@ async def handle_extrape(event):
     if is_echo_of_sent(text):
         return
 
-    # ── Dedup by content hash — prevents true duplicate messages only ──
+    # ── Skip if this original deal was already processed by a previous ExtraPe reply ──
+    # ExtraPe sometimes sends 2-3 replies for one deal (e.g. bilty.co AND fkrt.cc).
+    # All replies share the same reply_to_id. We process the first and skip the rest.
+    if replied_to_id and replied_to_id in extrape_processed_reply_ids:
+        log.info(f"[EXTRAPE] ⏭️ reply_to_id={replied_to_id} already processed — skipping duplicate ExtraPe reply")
+        stats["ignored"] += 1
+        return
+
+    # ── Dedup by content hash — catches duplicates with no reply_to_id ──
     msg_hash = hash(text.strip())
     if msg_hash in extrape_seen_hashes:
         stats["ignored"] += 1
@@ -653,6 +682,12 @@ async def handle_extrape(event):
             log.info("[EXTRAPE] 🖼️ No image available for this deal")
 
     ist_now = get_ist_now()
+
+    # ── Mark this reply_to_id as processed — prevents duplicate ExtraPe replies ──
+    if replied_to_id:
+        extrape_processed_reply_ids.add(replied_to_id)
+        if len(extrape_processed_reply_ids) > 100:
+            extrape_processed_reply_ids.pop()
 
     # ── CC deal → CC WA group ──
     # pending_is_cc = True  → deal was flagged CC when sent to ExtraPe (exact match)
