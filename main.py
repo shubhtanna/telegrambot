@@ -35,7 +35,6 @@ SOURCE_GROUPS = [
     -1001493857075,
     -1001412868909,
     -1001389782464,
-    -1001480964161,
     CC_DIRECT_GROUP,
 ]
 
@@ -495,6 +494,14 @@ async def send_to_whatsapp_single(text, target_group, image_bytes=None):
 # ══════════════════════════════════════════
 @client.on(events.NewMessage(chats=SOURCE_GROUPS))
 async def handle_source(event):
+    # ── Skip edited messages ──────────────────────────────────────────────────
+    # Telegram fires NewMessage for edits too. Deal groups often post a message
+    # then edit it multiple times (add link, fix typo, etc.) — each edit would
+    # send the deal to ExtraPe again, causing 20x sends.
+    # We only process the ORIGINAL post, never edits.
+    if event.message.edit_date:
+        return
+
     text = event.message.text or event.message.caption or ""
 
     amz_links = extract_amazon_links(text)
@@ -529,16 +536,34 @@ async def handle_source(event):
         return
 
     # ── Source-level dedup (runs AFTER CC_DIRECT_GROUP check above) ─────────
-    # Viral deals get forwarded to ALL source groups simultaneously.
-    # Without this, the same deal is sent to ExtraPe N times (once per group),
-    # and if ExtraPe can't convert it, EarnKaro gets it N times too.
+    # TWO-LAYER dedup to handle:
+    #   a) Same deal from multiple source groups (slightly different text)
+    #   b) Same deal text (exact match)
+    #
+    # Layer 1: Hash the LINKS in the message — links are identical even when
+    #   surrounding text differs between groups/bots. A deal with the same
+    #   fkrt.cc URL is the same deal regardless of description wording.
+    # Layer 2: Hash the normalized full text as fallback for CC deals
+    #   (CC deals may not have links yet, just keywords).
+    #
     # CC_DIRECT_GROUP is intentionally exempt (handled above with early return).
-    src_hash = hash(text.strip())
-    if src_hash in source_seen_hashes:
-        log.info("[SOURCE] ⏭️ Duplicate deal text — already dispatched from another group, skipping")
+
+    all_links_in_msg = sorted(extract_all_links(text))
+    if all_links_in_msg:
+        # Link-based dedup — most reliable, immune to text variations
+        dedup_key = hash(tuple(all_links_in_msg))
+        dedup_label = f"links:{all_links_in_msg}"
+    else:
+        # Text-based dedup for CC deals with no links yet
+        normalized = re.sub(r'\s+', ' ', text.strip().lower())
+        dedup_key = hash(normalized)
+        dedup_label = "normalized-text"
+
+    if dedup_key in source_seen_hashes:
+        log.info(f"[SOURCE] ⏭️ Duplicate ({dedup_label}) — already dispatched, skipping")
         return
-    source_seen_hashes.add(src_hash)
-    if len(source_seen_hashes) > 200:
+    source_seen_hashes.add(dedup_key)
+    if len(source_seen_hashes) > 500:
         source_seen_hashes.pop()
     # ─────────────────────────────────────────────────────────────────────────
 
