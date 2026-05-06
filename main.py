@@ -446,6 +446,9 @@ async def send_to_whatsapp_bulk(text, image_bytes=None):
                     timeout=aiohttp.ClientTimeout(total=30)
                 ) as resp:
                     body = await resp.text()
+                    if resp.status != 200:
+                        log.error(f"[WA-BULK] ❌ HTTP {resp.status} — WA sender may be down! {body[:120]}")
+                        return
                     log.info(f"[WA-BULK] ✅ Queued! {body[:80]}")
             else:
                 async with session.post(
@@ -454,6 +457,9 @@ async def send_to_whatsapp_bulk(text, image_bytes=None):
                     timeout=aiohttp.ClientTimeout(total=30)
                 ) as resp:
                     body = await resp.text()
+                    if resp.status != 200:
+                        log.error(f"[WA-BULK] ❌ HTTP {resp.status} — WA sender may be down! {body[:120]}")
+                        return
                     log.info(f"[WA-BULK] ✅ Queued! {body[:80]}")
         stats["sent_to_wa_bulk"] += 1
     except Exception as e:
@@ -477,6 +483,9 @@ async def send_to_whatsapp_single(text, target_group, image_bytes=None):
                     timeout=aiohttp.ClientTimeout(total=30)
                 ) as resp:
                     body = await resp.text()
+                    if resp.status != 200:
+                        log.error(f"[WA-SINGLE] ❌ HTTP {resp.status} — WA sender may be down! {body[:120]}")
+                        return
                     log.info(f"[WA-SINGLE] ✅ Sent to {target_group}! {body[:80]}")
             else:
                 async with session.post(
@@ -485,6 +494,9 @@ async def send_to_whatsapp_single(text, target_group, image_bytes=None):
                     timeout=aiohttp.ClientTimeout(total=30)
                 ) as resp:
                     body = await resp.text()
+                    if resp.status != 200:
+                        log.error(f"[WA-SINGLE] ❌ HTTP {resp.status} — WA sender may be down! {body[:120]}")
+                        return
                     log.info(f"[WA-SINGLE] ✅ Sent to {target_group}! {body[:80]}")
     except Exception as e:
         log.error(f"[WA-SINGLE] ❌ Failed: {e}")
