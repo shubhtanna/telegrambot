@@ -225,7 +225,7 @@ def get_ist_now():
 def is_quiet_hours():
     now = get_ist_now()
     current_minutes = now.hour * 60 + now.minute
-    quiet_start = 0 * 60 + 30
+    quiet_start = 1 * 60 + 0   # 01:00 = 1:00 AM
     quiet_end   = 8 * 60 + 0
     return quiet_start <= current_minutes < quiet_end
 
