@@ -828,7 +828,7 @@ async def run():
             log.info(f"📲 FK WA Group     : {FK_WA_GROUP}")
             log.info(f"📲 CC WA Group     : {CC_WA_GROUP}")
             log.info(f"📲 WA Sender       : {BAILEYS_URL or 'NOT SET'}")
-            log.info(f"🚦 Rate limit      : {MAX_DEALS_PER_HOUR} Amazon/FK deals per hour (CC exempt)")
+            # log.info(f"🚦 Rate limit      : {MAX_DEALS_PER_HOUR} Amazon/FK deals per hour (CC exempt)")
             log.info(f"⏱️  Freshness limit : drop Amazon deals older than {MAX_DEAL_AGE_MINUTES} min")
             log.info(f"🎯 Lucky deals/day : {LUCKY_DEALS_PER_DAY} (WA invite replaces dealspouch link)")
             log.info(f"📌 TG Bot Footer   : {TG_BOT_FOOTER.strip()}")
