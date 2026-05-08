@@ -3,7 +3,7 @@ from telethon.sessions import StringSession
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
-import asyncio, re, io, logging, time, aiohttp, os, threading, pytz, collections
+import asyncio, re, io, logging, time, aiohttp, os, threading, pytz, collections, random
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -22,13 +22,8 @@ EARNKARO_BOT   = "@ekconverter4bot"
 DEALSPOUCH_BOT = "@dealspouch_server_bot"
 MY_TG_GROUP    = "@finnindeals2"
 
-# FK deals → this ONE WA group only
-FK_WA_GROUP = "120363427339438586@g.us"
-
-# CC deals → this WA group
-CC_WA_GROUP = "120363426468421381@g.us"
-
-# This source group sends CC deals DIRECTLY — no bot conversion needed
+FK_WA_GROUP     = "120363427339438586@g.us"
+CC_WA_GROUP     = "120363426468421381@g.us"
 CC_DIRECT_GROUP = -1001481951196
 
 SOURCE_GROUPS = [
@@ -39,23 +34,8 @@ SOURCE_GROUPS = [
 ]
 
 # ══════════════════════════════════════════
-#  CC DEAL DETECTION  (v2 — smart multi-signal)
-#
-#  A message is a CC deal ONLY when it is clearly about
-#  applying for / getting a credit card — NOT just a product
-#  deal that mentions "cashback" or "bank offer".
-#
-#  Logic:
-#    HARD BLOCK  → always false  (amazon/flipkart product buy links)
-#    STRONG HIT  → any 1 strong keyword alone → true
-#    BANK + WEAK → bank name  + ≥1 weak CC keyword → true
-#    SHORT + WEAK→ CC short link + ≥1 weak CC keyword → true
-#    else        → false
+#  CC DEAL DETECTION
 # ══════════════════════════════════════════
-
-# Short-link domains used by CC affiliate programmes
-# NOTE: bilty.co is intentionally EXCLUDED here — ExtraPe uses bilty.co
-# for Flipkart conversions too, so it lives in extract_flipkart_links() instead.
 CC_SHORT_LINK_PATTERNS = re.compile(
     r'https?://(?:'
     r'extp\.in|'
@@ -67,8 +47,6 @@ CC_SHORT_LINK_PATTERNS = re.compile(
     re.IGNORECASE
 )
 
-# ── STRONG signals — these alone confirm a CC deal ──
-# (card-apply / card-offer language, never used for product deals)
 CC_STRONG_KEYWORDS = re.compile(
     r'\b('
     r'credit card|'
@@ -95,7 +73,6 @@ CC_STRONG_KEYWORDS = re.compile(
     re.IGNORECASE
 )
 
-# ── WEAK signals — only meaningful alongside a bank name or CC short link ──
 CC_WEAK_KEYWORDS = re.compile(
     r'\b('
     r'apply now|'
@@ -118,7 +95,6 @@ CC_WEAK_KEYWORDS = re.compile(
     re.IGNORECASE
 )
 
-# ── All major Indian banks & NBFCs that issue credit cards ──
 BANK_NAMES = re.compile(
     r'\b('
     r'hdfc(?: bank)?|'
@@ -158,56 +134,38 @@ BANK_NAMES = re.compile(
     re.IGNORECASE
 )
 
-# ── FALSE-POSITIVE GUARD ──
-# These patterns signal a plain product/shopping deal — never a CC deal.
-# If matched, is_cc_deal() returns False even if CC keywords are present.
-# e.g. "After Cashback ₹xxx  Buy: amazon.in/..."  →  product cashback offer
 CC_FALSE_POSITIVE = re.compile(
     r'(?:'
-    r'amazon\.in/(?:dp|gp)|'        # Amazon product link
-    r'amzn\.(?:in|to)|'             # Amazon short link
-    r'flipkart\.com/|'              # Flipkart product link
-    r'fkrt\.\w+|'                   # Flipkart short link
-    r'(?:buy|order|shop)(?: now| here| at)?\s*[:\-]?\s*https?://|'  # "Buy: <link>"
-    r'(?:loot|deal|offer)\s+at\s+₹|'   # "LOOT at ₹xxx"
-    r'after\s+cashback\s+₹|'           # "After Cashback ₹xxx"
-    r'collect\s+cashback\s*[:\-]?\s*https?://'  # "Collect Cashback: <link>"
+    r'amazon\.in/(?:dp|gp)|'
+    r'amzn\.(?:in|to)|'
+    r'flipkart\.com/|'
+    r'fkrt\.\w+|'
+    r'(?:buy|order|shop)(?: now| here| at)?\s*[:\-]?\s*https?://|'
+    r'(?:loot|deal|offer)\s+at\s+₹|'
+    r'after\s+cashback\s+₹|'
+    r'collect\s+cashback\s*[:\-]?\s*https?://'
     r')',
     re.IGNORECASE
 )
 
 def is_cc_deal(text: str) -> bool:
-    """
-    Returns True ONLY for genuine credit card apply / card-offer deals.
-    Product deals with cashback/bank-offer language are rejected.
-    """
     if not text:
         return False
-
-    # ── 1. Hard block — looks like a product shopping deal ──
     if CC_FALSE_POSITIVE.search(text):
         log.debug("[CC-DETECT] ❌ False-positive guard triggered — not a CC deal")
         return False
-
-    # ── 2. Strong keyword alone → definite CC deal ──
     if CC_STRONG_KEYWORDS.search(text):
         log.debug("[CC-DETECT] ✅ Strong CC keyword matched")
         return True
-
-    # ── 3. Bank name + weak CC keyword → CC deal ──
-    has_bank = bool(BANK_NAMES.search(text))
-    has_weak = bool(CC_WEAK_KEYWORDS.search(text))
+    has_bank    = bool(BANK_NAMES.search(text))
+    has_weak    = bool(CC_WEAK_KEYWORDS.search(text))
     has_cc_link = bool(CC_SHORT_LINK_PATTERNS.search(text))
-
     if has_bank and has_weak:
         log.debug("[CC-DETECT] ✅ Bank name + weak CC keyword matched")
         return True
-
-    # ── 4. CC short link + weak CC keyword → CC deal ──
     if has_cc_link and has_weak:
         log.debug("[CC-DETECT] ✅ CC short link + weak CC keyword matched")
         return True
-
     return False
 
 def extract_cc_short_links(text):
@@ -225,7 +183,7 @@ def get_ist_now():
 def is_quiet_hours():
     now = get_ist_now()
     current_minutes = now.hour * 60 + now.minute
-    quiet_start = 1 * 60 + 0   # 01:00 = 1:00 AM
+    quiet_start = 1 * 60 + 0
     quiet_end   = 8 * 60 + 0
     return quiet_start <= current_minutes < quiet_end
 
@@ -261,46 +219,65 @@ stats = {
 }
 
 # ══════════════════════════════════════════
+#  DAILY DEAL COUNTER (random 10 WA invite replacements)
+# ══════════════════════════════════════════
+_daily_counter_date = None
+_daily_deal_count   = 0
+_lucky_deal_slots   = set()
+
+WA_INVITE_LINK      = "https://tinyurl.com/fhknr97k"
+TG_BOT_FOOTER       = "\n\nTelegram Bot - t.me/Dealspouch_Product_bot"
+LUCKY_DEALS_PER_DAY = 10
+
+def _refresh_daily_counter():
+    global _daily_counter_date, _daily_deal_count, _lucky_deal_slots
+    today = get_ist_now().date()
+    if _daily_counter_date != today:
+        _daily_counter_date = today
+        _daily_deal_count   = 0
+        _lucky_deal_slots   = set(random.sample(range(1, 51), LUCKY_DEALS_PER_DAY))
+        log.info(f"[DAILY] 🗓️ New day {today} — lucky slots: {sorted(_lucky_deal_slots)}")
+
+def _is_lucky_deal() -> bool:
+    global _daily_deal_count
+    _refresh_daily_counter()
+    _daily_deal_count += 1
+    lucky = _daily_deal_count in _lucky_deal_slots
+    log.info(f"[DAILY] Deal #{_daily_deal_count} today | lucky={lucky}")
+    return lucky
+
+# ══════════════════════════════════════════
 #  SHARED STATE
 #
 #  pending_media          : { sent_msg_id → image_bytes | None }
-#                           Keyed by message ID sent to ExtraPe.
-#                           ExtraPe replies_to that ID → exact match.
-#
 #  sent_links_store       : { sent_msg_id → {"links": set, "is_cc": bool} }
 #  sent_original_text     : { sent_msg_id → original_text }
 #
-#  dealspouch_media_queue : collections.deque of image_bytes|None
-#                           FIFO queue — Dealspouch does NOT use reply_to,
-#                           it sends fresh messages in the same order we sent.
-#                           So we match by arrival order (FIFO), not by ID.
-#                           One entry pushed per message sent to Dealspouch.
+#  dealspouch_media_queue : FIFO deque of image_bytes|None
+#
+#  ── IMAGE INTEGRITY GUARANTEE ─────────────────────────────────────────
+#  Every message sent to Dealspouch gets EXACTLY ONE entry pushed into
+#  dealspouch_media_queue at the same time (even if that entry is None).
+#
+#  On ExtraPe reply:
+#    reply_to MATCHED → use matched media_bytes             (correct image ✅)
+#    reply_to MISSED  → media_bytes = None, push None       (text-only, no mismatch ✅)
+#
+#  We NEVER pop oldest pending_media on a mismatch — that was the root
+#  cause of wrong images appearing on Amazon deals.
 # ══════════════════════════════════════════
 pending_media          = {}
 sent_links_store       = {}
 sent_original_text     = {}
-dealspouch_media_queue = collections.deque()  # ← FIFO: solves Dealspouch image mismatch
+dealspouch_media_queue = collections.deque()
 
 client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
 
-last_dealspouch_handled = 0
-DEALSPOUCH_COOLDOWN = 15
-
-# Content-hash dedup set for ExtraPe replies — replaces time-based cooldown.
-# Stores hash(text) of each converted reply so exact duplicates are skipped,
-# without blocking valid back-to-back deals that arrive close together.
-extrape_seen_hashes = set()
-
-# Processed reply_to_id tracker — prevents duplicate FK sends when ExtraPe
-# sends multiple converted replies for the same original message.
-# ExtraPe sometimes sends both a bilty.co AND fkrt.cc version of the same FK deal.
-# Both reply to the same msg_id. We process the FIRST one and skip the rest.
+last_dealspouch_handled     = 0
+DEALSPOUCH_COOLDOWN         = 15
+extrape_seen_hashes         = set()
 extrape_processed_reply_ids = set()
-
-# Source-level dedup — same deal text arriving from multiple source groups
-# (common for viral deals forwarded to all groups) should only be sent to
-# ExtraPe ONCE. We hash the text and skip if seen within last 200 entries.
-source_seen_hashes = set()
+source_seen_hashes          = set()
 
 # ══════════════════════════════════════════
 #  LINK DETECTORS
@@ -314,12 +291,6 @@ def extract_amazon_links(text):
     )
 
 def extract_flipkart_links_source(text):
-    """
-    Strict FK detector for SOURCE GROUP messages.
-    Only accepts native Flipkart domains — fkrt.cc, flipkart.com.
-    bilty.co from source groups is NOT a FK link (it's used by many stores).
-    bilty.co only counts as FK when it comes from ExtraPe's converted reply.
-    """
     if not text:
         return []
     return re.findall(
@@ -328,11 +299,6 @@ def extract_flipkart_links_source(text):
     )
 
 def extract_flipkart_links(text):
-    """
-    FK detector for EXTRAPE REPLY messages.
-    Includes bilty.co because ExtraPe converts FK links to bilty.co short links.
-    Do NOT use this for source group messages — use extract_flipkart_links_source().
-    """
     if not text:
         return []
     return re.findall(
@@ -354,63 +320,46 @@ def is_extrape_failure(text):
     return "will not be able to convert" in text.lower()
 
 def is_echo_of_sent(text):
-    """
-    Returns True if ExtraPe is just echoing our original input back.
-    We detect this by checking if the reply's links overlap with what we sent.
-    """
     if not sent_links_store:
         return False
     reply_links = extract_all_links(text)
     if not reply_links:
         return False
     for entry in sent_links_store.values():
-        original_links = entry["links"]
-        if reply_links & original_links:
+        if reply_links & entry["links"]:
             log.info("[EXTRAPE] 🔄 Echo detected — same links as sent. Waiting for converted reply...")
             return True
     return False
 
 def _cleanup_store(msg_id):
-    """Remove a deal's state from all tracking dicts."""
     pending_media.pop(msg_id, None)
     sent_links_store.pop(msg_id, None)
     sent_original_text.pop(msg_id, None)
 
 def _store_deal(sent_msg_id, media_bytes, original_links, is_cc, original_text):
-    """Save deal state keyed by the message ID we sent to ExtraPe."""
     pending_media[sent_msg_id]      = media_bytes
     sent_links_store[sent_msg_id]   = {"links": original_links, "is_cc": is_cc}
     sent_original_text[sent_msg_id] = original_text
-
-    # Keep stores bounded
     if len(sent_links_store) > 20:
         oldest = next(iter(sent_links_store))
         _cleanup_store(oldest)
 
 # ══════════════════════════════════════════
 #  TEXT SANITIZER
-#  Removes fake URL fragments that appear when words like "DealsWait..."
-#  get split across lines and ExtraPe's parser reads them as URLs.
-#  e.g. "DealsWait...\nYou" → ExtraPe sees "https://Wait...You" → failure
-#  We strip any https?:// token whose host part starts with uppercase or
-#  contains ellipsis/dots in a non-domain pattern.
 # ══════════════════════════════════════════
 _FAKE_URL_RE = re.compile(
-    r'https?://(?!'         # starts with http(s)://
-    r'(?:[a-z0-9\-]+\.)+' # but NOT followed by valid lowercase domain
-    r'[a-z]{2,}'            # with valid TLD
-    r')'
-    r'\S*',                # consume rest of token
+    r'https?://(?!'
+    r'(?:[a-z0-9\-]+\.)+[a-z]{2,}'
+    r')\S*',
     re.IGNORECASE
 )
 
 def sanitize_text_for_bot(text: str) -> str:
-    """Strip fake/broken URL fragments before sending text to ExtraPe/EarnKaro."""
     if not text:
         return text
     cleaned = _FAKE_URL_RE.sub('', text).strip()
     if cleaned != text:
-        log.info(f"[SANITIZE] Removed fake URL fragments from text")
+        log.info("[SANITIZE] Removed fake URL fragments from text")
     return cleaned
 
 # ══════════════════════════════════════════
@@ -430,7 +379,6 @@ async def download_media_bytes(message):
 #  WHATSAPP SENDERS
 # ══════════════════════════════════════════
 async def send_to_whatsapp_bulk(text, image_bytes=None):
-    """Send to ALL WA groups (bulk broadcast)."""
     if not BAILEYS_URL:
         log.warning("[WA-BULK] BAILEYS_URL not set!")
         return
@@ -466,7 +414,6 @@ async def send_to_whatsapp_bulk(text, image_bytes=None):
         log.error(f"[WA-BULK] ❌ Failed: {e}")
 
 async def send_to_whatsapp_single(text, target_group, image_bytes=None):
-    """Send to ONE specific WA group."""
     if not BAILEYS_URL:
         log.warning("[WA-SINGLE] BAILEYS_URL not set!")
         return
@@ -506,18 +453,12 @@ async def send_to_whatsapp_single(text, target_group, image_bytes=None):
 # ══════════════════════════════════════════
 @client.on(events.NewMessage(chats=SOURCE_GROUPS))
 async def handle_source(event):
-    # ── Skip edited messages ──────────────────────────────────────────────────
-    # Telegram fires NewMessage for edits too. Deal groups often post a message
-    # then edit it multiple times (add link, fix typo, etc.) — each edit would
-    # send the deal to ExtraPe again, causing 20x sends.
-    # We only process the ORIGINAL post, never edits.
     if event.message.edit_date:
         return
 
-    text = event.message.text or event.message.caption or ""
-
+    text      = event.message.text or event.message.caption or ""
     amz_links = extract_amazon_links(text)
-    fk_links  = extract_flipkart_links_source(text)  # strict: fkrt.cc/flipkart.com only
+    fk_links  = extract_flipkart_links_source(text)
     cc_deal   = is_cc_deal(text)
 
     if not amz_links and not fk_links and not cc_deal:
@@ -526,20 +467,13 @@ async def handle_source(event):
     stats["deals_found"] += 1
     chat_id = event.chat_id
 
-    # ══════════════════════════
-    #  CC DEAL — DIRECT GROUP
-    #  Always handled first — BEFORE any dedup check.
-    #  Reason: the same CC deal text may arrive from another source group
-    #  first and get hashed into source_seen_hashes. If dedup ran before
-    #  this check, CC_DIRECT_GROUP deals would be silently dropped.
-    # ══════════════════════════
+    # ── CC DEAL — DIRECT GROUP (straight to WA, no bot) ──
     if cc_deal and chat_id == CC_DIRECT_GROUP:
         log.info(f"[CC-DIRECT] 💳 CC Deal #{stats['deals_found']} from direct group!")
         media_bytes = await download_media_bytes(event.message)
         log.info(f"[CC-DIRECT] 🖼️ Image: {'yes' if media_bytes else 'no'}")
-
         if is_quiet_hours():
-            log.info(f"[CC-DIRECT] 🌙 Quiet hours — skipping")
+            log.info("[CC-DIRECT] 🌙 Quiet hours — skipping")
             stats["ignored"] += 1
         else:
             await send_to_whatsapp_single(text, CC_WA_GROUP, media_bytes)
@@ -547,28 +481,14 @@ async def handle_source(event):
             log.info("[CC-DIRECT] ✅ Sent directly to CC WA group")
         return
 
-    # ── Source-level dedup (runs AFTER CC_DIRECT_GROUP check above) ─────────
-    # TWO-LAYER dedup to handle:
-    #   a) Same deal from multiple source groups (slightly different text)
-    #   b) Same deal text (exact match)
-    #
-    # Layer 1: Hash the LINKS in the message — links are identical even when
-    #   surrounding text differs between groups/bots. A deal with the same
-    #   fkrt.cc URL is the same deal regardless of description wording.
-    # Layer 2: Hash the normalized full text as fallback for CC deals
-    #   (CC deals may not have links yet, just keywords).
-    #
-    # CC_DIRECT_GROUP is intentionally exempt (handled above with early return).
-
+    # ── Source-level dedup ──
     all_links_in_msg = sorted(extract_all_links(text))
     if all_links_in_msg:
-        # Link-based dedup — most reliable, immune to text variations
-        dedup_key = hash(tuple(all_links_in_msg))
+        dedup_key   = hash(tuple(all_links_in_msg))
         dedup_label = f"links:{all_links_in_msg}"
     else:
-        # Text-based dedup for CC deals with no links yet
-        normalized = re.sub(r'\s+', ' ', text.strip().lower())
-        dedup_key = hash(normalized)
+        normalized  = re.sub(r'\s+', ' ', text.strip().lower())
+        dedup_key   = hash(normalized)
         dedup_label = "normalized-text"
 
     if dedup_key in source_seen_hashes:
@@ -577,51 +497,32 @@ async def handle_source(event):
     source_seen_hashes.add(dedup_key)
     if len(source_seen_hashes) > 500:
         source_seen_hashes.pop()
-    # ─────────────────────────────────────────────────────────────────────────
 
-    # ══════════════════════════
-    #  CC DEAL — OTHER GROUPS → ExtraPe
-    # ══════════════════════════
+    # ── CC DEAL — OTHER GROUPS → ExtraPe ──
     if cc_deal and chat_id != CC_DIRECT_GROUP:
         log.info(f"[CC-EXTRAPE] 💳 CC Deal #{stats['deals_found']} from group {chat_id} → ExtraPe")
         media_bytes    = await download_media_bytes(event.message)
         original_links = extract_all_links(text)
         clean_text     = sanitize_text_for_bot(text)
-
         sent = await client.send_message(EXTRAPE_BOT, clean_text)
         _store_deal(sent.id, media_bytes, original_links, is_cc=True, original_text=clean_text)
-
         stats["sent_to_extrape"] += 1
         log.info(f"[CC-EXTRAPE] 📤 Sent to ExtraPe (CC=True, msg_id={sent.id})")
         return
 
-    # ══════════════════════════
-    #  AMAZON / FLIPKART → ExtraPe
-    # ══════════════════════════
-    link_type = "Amazon" if amz_links else "Flipkart"
+    # ── AMAZON / FLIPKART → ExtraPe ──
+    link_type      = "Amazon" if amz_links else "Flipkart"
     log.info(f"[SOURCE] 🎯 {link_type} Deal #{stats['deals_found']} found!")
-
     media_bytes    = await download_media_bytes(event.message)
     original_links = extract_all_links(text)
     clean_text     = sanitize_text_for_bot(text)
-
     sent = await client.send_message(EXTRAPE_BOT, clean_text)
     _store_deal(sent.id, media_bytes, original_links, is_cc=False, original_text=clean_text)
-
     stats["sent_to_extrape"] += 1
     log.info(f"[EXTRAPE] 📤 Sent to ExtraPe (CC=False, msg_id={sent.id})")
 
 # ══════════════════════════════════════════
 #  STEP 2: ExtraPe reply → match by reply_to_msg_id
-#
-#  THE KEY FIX:
-#  ExtraPe always replies_to the message we sent it.
-#  We use that reply_to_msg_id to look up the EXACT media/metadata
-#  for that specific deal — completely eliminating image mismatches.
-#
-#  ExtraPe sends 2 messages per deal:
-#    Message 1 — echo of our input  → detected by is_echo_of_sent() → SKIP
-#    Message 2 — converted links    → USE THIS
 # ══════════════════════════════════════════
 @client.on(events.NewMessage(chats=EXTRAPE_BOT))
 async def handle_extrape(event):
@@ -629,7 +530,6 @@ async def handle_extrape(event):
     if not text:
         return
 
-    # ── Resolve which original deal this reply belongs to ──
     replied_to_id = None
     if event.message.reply_to and event.message.reply_to.reply_to_msg_id:
         replied_to_id = event.message.reply_to.reply_to_msg_id
@@ -643,11 +543,9 @@ async def handle_extrape(event):
             original_text = sent_original_text.get(replied_to_id)
             _cleanup_store(replied_to_id)
         elif sent_original_text:
-            # Fallback: grab oldest
-            oldest_key = next(iter(sent_original_text))
+            oldest_key    = next(iter(sent_original_text))
             original_text = sent_original_text.get(oldest_key)
             _cleanup_store(oldest_key)
-
         if original_text:
             await client.send_message(EARNKARO_BOT, original_text)
             log.info("[EARNKARO] 📤 Forwarded original deal to EarnKaro")
@@ -660,15 +558,13 @@ async def handle_extrape(event):
     if is_echo_of_sent(text):
         return
 
-    # ── Skip if this original deal was already processed by a previous ExtraPe reply ──
-    # ExtraPe sometimes sends 2-3 replies for one deal (e.g. bilty.co AND fkrt.cc).
-    # All replies share the same reply_to_id. We process the first and skip the rest.
+    # ── Skip already-processed reply_to_id ──
     if replied_to_id and replied_to_id in extrape_processed_reply_ids:
-        log.info(f"[EXTRAPE] ⏭️ reply_to_id={replied_to_id} already processed — skipping duplicate ExtraPe reply")
+        log.info(f"[EXTRAPE] ⏭️ reply_to_id={replied_to_id} already processed — skipping duplicate")
         stats["ignored"] += 1
         return
 
-    # ── Dedup by content hash — catches duplicates with no reply_to_id ──
+    # ── Dedup by content hash ──
     msg_hash = hash(text.strip())
     if msg_hash in extrape_seen_hashes:
         stats["ignored"] += 1
@@ -679,57 +575,58 @@ async def handle_extrape(event):
         extrape_seen_hashes.pop()
 
     # ══════════════════════════════════════════
-    #  FETCH MEDIA + CC FLAG — matched by reply_to_id
+    #  FETCH MEDIA + CC FLAG
     #
-    #  CRITICAL: pending_is_cc MUST come only from the matched deal's
-    #  sent_links_store entry. We must NEVER fall back to reading
-    #  is_cc from an unrelated old entry — that's what caused the
-    #  trolley bag deal to be routed to CC group (a stale CC entry
-    #  in sent_links_store was read when reply_to match failed).
+    #  IMAGE INTEGRITY RULE:
+    #  ✅ reply_to MATCHED → use exact media from that deal's store entry
+    #  ❌ reply_to MISSED  → media_bytes = None (NO oldest-pop fallback)
     #
-    #  Rule: if we can't match reply_to_id → pending_is_cc = False.
-    #  We still use is_cc_deal(text) as a second check on the
-    #  converted reply text itself, which is always reliable.
+    #  Popping oldest pending_media on mismatch = wrong image on deals.
+    #  Text-only is always safer than a mismatched image.
+    #
+    #  For Amazon deals: we push media_bytes (or None) to
+    #  dealspouch_media_queue right after sending to Dealspouch.
+    #  One push per send keeps the FIFO perfectly in sync.
     # ══════════════════════════════════════════
-    media_bytes    = None
-    pending_is_cc  = False   # default ALWAYS False — only set True on exact match
+    media_bytes   = None
+    pending_is_cc = False
 
     if replied_to_id and replied_to_id in pending_media:
-        # ✅ Exact match — use this deal's media and CC flag
+        # ✅ Exact match — correct image and CC flag guaranteed
         media_bytes   = pending_media.get(replied_to_id)
         pending_is_cc = sent_links_store.get(replied_to_id, {}).get("is_cc", False)
         _cleanup_store(replied_to_id)
-        log.info(f"[EXTRAPE] ✅ Matched by reply_to_id={replied_to_id} | cc={pending_is_cc} | image={'yes' if media_bytes else 'no'}")
+        log.info(
+            f"[EXTRAPE] ✅ Matched reply_to_id={replied_to_id} | "
+            f"cc={pending_is_cc} | image={'yes' if media_bytes else 'no'}"
+        )
     else:
-        # ⚠️ No reply_to match — pop oldest media but DO NOT inherit is_cc flag.
-        # pending_is_cc stays False — we rely solely on is_cc_deal(text) below.
-        log.warning("[EXTRAPE] ⚠️ No reply_to match — popping oldest media only (is_cc stays False)")
-        if pending_media:
-            oldest_key  = next(iter(pending_media))
-            media_bytes = pending_media.get(oldest_key)
-            _cleanup_store(oldest_key)
-            # ✅ Do NOT read is_cc from oldest_key — it may be a different deal!
+        # ❌ No match — DO NOT pop oldest (prevents image mismatch)
+        log.warning(
+            "[EXTRAPE] ⚠️ No reply_to match — will try ExtraPe's own image only "
+            "(safe: avoids attaching wrong deal's image)"
+        )
+        # media_bytes stays None, pending_is_cc stays False
 
-    # ── Fallback: try ExtraPe reply's own image ──
+    # ── Fallback: ExtraPe reply's own attached image ──
+    # Safe — ExtraPe only attaches an image for the deal it just converted,
+    # so this cannot be a different deal's image.
     if not media_bytes:
         media_bytes = await download_media_bytes(event.message)
         if media_bytes:
-            log.info("[EXTRAPE] 🖼️ No source image — using ExtraPe reply image as fallback")
+            log.info("[EXTRAPE] 🖼️ Using ExtraPe reply's own image as fallback")
         else:
-            log.info("[EXTRAPE] 🖼️ No image available for this deal")
+            log.info("[EXTRAPE] 🖼️ No image available — will send text only")
 
     ist_now = get_ist_now()
 
-    # ── Mark this reply_to_id as processed — prevents duplicate ExtraPe replies ──
+    # ── Mark reply_to_id as processed ──
     if replied_to_id:
         extrape_processed_reply_ids.add(replied_to_id)
         if len(extrape_processed_reply_ids) > 100:
             extrape_processed_reply_ids.pop()
 
     # ── CC deal → CC WA group ──
-    # pending_is_cc = True  → deal was flagged CC when sent to ExtraPe (exact match)
-    # is_cc_deal(text) = True → converted reply text itself looks like CC deal
-    # Both checks are safe: FP guard in is_cc_deal() blocks Amazon/FK links
     if pending_is_cc or is_cc_deal(text):
         log.info(f"[EXTRAPE] 💳 CC deal → CC WA group | image={'yes' if media_bytes else 'no'}")
         if is_quiet_hours():
@@ -755,13 +652,17 @@ async def handle_extrape(event):
     if extract_amazon_links(text):
         log.info(f"[EXTRAPE] ✅ AMZ converted → Dealspouch | image={'yes' if media_bytes else 'no'}")
         await client.send_message(DEALSPOUCH_BOT, text)
-        # ✅ Push image to FIFO queue — Dealspouch replies in same order we send,
-        #    but does NOT use reply_to, so we match by order not by message ID.
-        #    This prevents iPhone image showing for kitchen deal (or any mismatch).
+
+        # ✅ ALWAYS push one entry to FIFO queue — even if None.
+        #    One push per send keeps queue perfectly in sync with Dealspouch replies.
+        #    None entry = text-only deal (correct), not a mismatched image.
         dealspouch_media_queue.append(media_bytes)
-        if len(dealspouch_media_queue) > 20:          # keep bounded
+        if len(dealspouch_media_queue) > 20:
             dealspouch_media_queue.popleft()
-        log.info(f"[DEALSPOUCH-QUEUE] 📥 Queued image — queue size: {len(dealspouch_media_queue)}")
+        log.info(
+            f"[DEALSPOUCH-QUEUE] 📥 Pushed image={'yes' if media_bytes else 'no (text-only)'} "
+            f"| queue size: {len(dealspouch_media_queue)}"
+        )
         stats["amz_sent_to_dealspouch"] += 1
         return
 
@@ -769,15 +670,12 @@ async def handle_extrape(event):
     stats["ignored"] += 1
 
 # ══════════════════════════════════════════
-#  STEP 3: Dealspouch → TG + WA bulk
-#  (Amazon only)
+#  STEP 3: Dealspouch → TG + WA bulk  (Amazon only)
 #
-#  WHY FIFO QUEUE:
-#  Dealspouch bot does NOT reply_to our message — it sends a brand new message.
-#  So we cannot match by reply_to_msg_id. Instead we rely on ORDER:
-#  Dealspouch always replies in the same order we sent deals to it.
-#  We push images into dealspouch_media_queue when sending to Dealspouch,
-#  and popleft() here — guaranteed correct image for each deal.
+#  FIFO guarantees correct image per deal:
+#  • One push to queue per Dealspouch send (in handle_extrape)
+#  • One popleft() here per Dealspouch reply
+#  • None entry → text-only (intentional, safe)
 # ══════════════════════════════════════════
 @client.on(events.NewMessage(chats=DEALSPOUCH_BOT))
 async def handle_dealspouch(event):
@@ -800,12 +698,24 @@ async def handle_dealspouch(event):
     media_bytes = None
     if dealspouch_media_queue:
         media_bytes = dealspouch_media_queue.popleft()
-        log.info(f"[DEALSPOUCH] ✅ Popped image from queue | image={'yes' if media_bytes else 'no'} | remaining={len(dealspouch_media_queue)}")
+        log.info(
+            f"[DEALSPOUCH] ✅ Popped from queue | "
+            f"image={'yes' if media_bytes else 'no (text-only)'} | "
+            f"remaining={len(dealspouch_media_queue)}"
+        )
     else:
-        log.warning("[DEALSPOUCH] ⚠️ Queue empty — no image for this deal (sending text only)")
+        log.warning("[DEALSPOUCH] ⚠️ Queue empty — sending text only")
 
     ist_now = get_ist_now()
     log.info(f"[DEALSPOUCH] ✅ Valid! IST: {ist_now.strftime('%H:%M')} | image={'yes' if media_bytes else 'no'}")
+
+    # ── Lucky deal: replace dealspouch link with WA invite ──
+    if _is_lucky_deal():
+        text = re.sub(r'https?://amaz\.dealspouch\.com/\S+', WA_INVITE_LINK, text)
+        log.info("[DAILY] 🎯 Lucky deal — replaced dealspouch link with WA invite")
+
+    # ── Append TG bot footer to every Amazon deal ──
+    text = text + TG_BOT_FOOTER
 
     # Always post to Telegram
     try:
@@ -841,6 +751,8 @@ async def run():
             log.info(f"📲 FK WA Group   : {FK_WA_GROUP}")
             log.info(f"📲 CC WA Group   : {CC_WA_GROUP}")
             log.info(f"📲 WA Sender     : {BAILEYS_URL or 'NOT SET'}")
+            log.info(f"🎯 Lucky deals/day: {LUCKY_DEALS_PER_DAY} (WA invite replaces dealspouch link)")
+            log.info(f"📌 TG Bot Footer : {TG_BOT_FOOTER.strip()}")
             log.info("⏳ Waiting for deals...\n")
             await client.run_until_disconnected()
         except Exception as e:
