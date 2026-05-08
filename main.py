@@ -43,32 +43,32 @@ SOURCE_GROUPS = [
 #  Tune MAX_DEALS_PER_HOUR to match your expected volume.
 #  e.g. if ~60 deals/hour arrive and you want ~20 sent → set 20
 # ══════════════════════════════════════════
-MAX_DEALS_PER_HOUR  = 20        # ← adjust this to your liking
-_rate_hour_window   = None      # which IST hour window is active
-_rate_hour_count    = 0         # how many deals accepted this hour
+# MAX_DEALS_PER_HOUR  = 20        # ← adjust this to your liking
+# _rate_hour_window   = None      # which IST hour window is active
+# _rate_hour_count    = 0         # how many deals accepted this hour
 
-def _is_rate_allowed() -> bool:
-    """
-    Returns True if this deal is within the hourly cap.
-    Resets counter automatically when the IST hour changes.
-    """
-    global _rate_hour_window, _rate_hour_count
-    now  = get_ist_now()
-    # Use date+hour as the window key so it resets every new hour
-    window = (now.date(), now.hour)
-    if _rate_hour_window != window:
-        _rate_hour_window = window
-        _rate_hour_count  = 0
-        log.info(f"[RATE] 🕐 New hour window {window} — counter reset")
-    if _rate_hour_count >= MAX_DEALS_PER_HOUR:
-        log.info(
-            f"[RATE] 🚫 Hourly cap reached ({_rate_hour_count}/{MAX_DEALS_PER_HOUR}) "
-            f"— deal dropped"
-        )
-        return False
-    _rate_hour_count += 1
-    log.info(f"[RATE] ✅ Deal accepted ({_rate_hour_count}/{MAX_DEALS_PER_HOUR} this hour)")
-    return True
+# def _is_rate_allowed() -> bool:
+#     """
+#     Returns True if this deal is within the hourly cap.
+#     Resets counter automatically when the IST hour changes.
+#     """
+#     global _rate_hour_window, _rate_hour_count
+#     now  = get_ist_now()
+#     # Use date+hour as the window key so it resets every new hour
+#     window = (now.date(), now.hour)
+#     if _rate_hour_window != window:
+#         _rate_hour_window = window
+#         _rate_hour_count  = 0
+#         log.info(f"[RATE] 🕐 New hour window {window} — counter reset")
+#     if _rate_hour_count >= MAX_DEALS_PER_HOUR:
+#         log.info(
+#             f"[RATE] 🚫 Hourly cap reached ({_rate_hour_count}/{MAX_DEALS_PER_HOUR}) "
+#             f"— deal dropped"
+#         )
+#         return False
+#     _rate_hour_count += 1
+#     log.info(f"[RATE] ✅ Deal accepted ({_rate_hour_count}/{MAX_DEALS_PER_HOUR} this hour)")
+#     return True
 
 # ══════════════════════════════════════════
 #  OPTION 2 — FRESHNESS CHECK
@@ -554,9 +554,9 @@ async def handle_source(event):
 
     # ── OPTION 1: Rate limit check (after dedup, before processing) ──
     # CC deals from other groups are also exempt — they are rare and valuable.
-    if not cc_deal and not _is_rate_allowed():
-        stats["rate_dropped"] += 1
-        return
+    # if not cc_deal and not _is_rate_allowed():
+    #     stats["rate_dropped"] += 1
+    #     return
 
     # Record source timestamp for freshness check later (Amazon deals only)
     # We push this into dealspouch_time_queue alongside media in handle_extrape
