@@ -34,6 +34,59 @@ SOURCE_GROUPS = [
 ]
 
 # ══════════════════════════════════════════
+#  OPTION 1 — RATE LIMIT AT SOURCE
+#
+#  Max deals allowed into the pipeline per hour.
+#  Once this limit is hit, new deals are dropped until the next hour window.
+#  Resets automatically every hour based on IST time.
+#
+#  Tune MAX_DEALS_PER_HOUR to match your expected volume.
+#  e.g. if ~60 deals/hour arrive and you want ~20 sent → set 20
+# ══════════════════════════════════════════
+MAX_DEALS_PER_HOUR  = 20        # ← adjust this to your liking
+_rate_hour_window   = None      # which IST hour window is active
+_rate_hour_count    = 0         # how many deals accepted this hour
+
+def _is_rate_allowed() -> bool:
+    """
+    Returns True if this deal is within the hourly cap.
+    Resets counter automatically when the IST hour changes.
+    """
+    global _rate_hour_window, _rate_hour_count
+    now  = get_ist_now()
+    # Use date+hour as the window key so it resets every new hour
+    window = (now.date(), now.hour)
+    if _rate_hour_window != window:
+        _rate_hour_window = window
+        _rate_hour_count  = 0
+        log.info(f"[RATE] 🕐 New hour window {window} — counter reset")
+    if _rate_hour_count >= MAX_DEALS_PER_HOUR:
+        log.info(
+            f"[RATE] 🚫 Hourly cap reached ({_rate_hour_count}/{MAX_DEALS_PER_HOUR}) "
+            f"— deal dropped"
+        )
+        return False
+    _rate_hour_count += 1
+    log.info(f"[RATE] ✅ Deal accepted ({_rate_hour_count}/{MAX_DEALS_PER_HOUR} this hour)")
+    return True
+
+# ══════════════════════════════════════════
+#  OPTION 2 — FRESHNESS CHECK
+#
+#  Maximum age (in minutes) a deal is allowed to be when it reaches
+#  handle_dealspouch(). If the Dealspouch reply arrives too late
+#  (queue was backed up), the deal is silently dropped.
+#
+#  We track the IST timestamp when each deal was first seen at source,
+#  keyed by sent_msg_id. handle_dealspouch pops FIFO timestamps to match.
+#
+#  Tune MAX_DEAL_AGE_MINUTES to your audience's tolerance.
+#  e.g. 30 = drop any deal older than 30 minutes
+# ══════════════════════════════════════════
+MAX_DEAL_AGE_MINUTES  = 30      # ← adjust this to your liking
+dealspouch_time_queue = collections.deque()   # FIFO of source timestamps (float epoch)
+
+# ══════════════════════════════════════════
 #  CC DEAL DETECTION
 # ══════════════════════════════════════════
 CC_SHORT_LINK_PATTERNS = re.compile(
@@ -216,10 +269,12 @@ stats = {
     "posted_to_tg": 0,
     "sent_to_wa_bulk": 0,
     "ignored": 0,
+    "rate_dropped": 0,
+    "stale_dropped": 0,
 }
 
 # ══════════════════════════════════════════
-#  DAILY DEAL COUNTER (random 10 WA invite replacements)
+#  DAILY DEAL COUNTER (random 13 WA invite replacements)
 # ══════════════════════════════════════════
 _daily_counter_date = None
 _daily_deal_count   = 0
@@ -227,7 +282,7 @@ _lucky_deal_slots   = set()
 
 WA_INVITE_LINK      = "https://tinyurl.com/fhknr97k"
 TG_BOT_FOOTER       = "\n\nTelegram Bot - t.me/Dealspouch_Product_bot"
-LUCKY_DEALS_PER_DAY = 10
+LUCKY_DEALS_PER_DAY = 13        # ← updated from 10 to 13
 
 def _refresh_daily_counter():
     global _daily_counter_date, _daily_deal_count, _lucky_deal_slots
@@ -235,7 +290,9 @@ def _refresh_daily_counter():
     if _daily_counter_date != today:
         _daily_counter_date = today
         _daily_deal_count   = 0
-        _lucky_deal_slots   = set(random.sample(range(1, 51), LUCKY_DEALS_PER_DAY))
+        # Sample from first 60 deals expected today
+        # Increase range if you expect more than 60 Amazon deals/day
+        _lucky_deal_slots   = set(random.sample(range(1, 61), LUCKY_DEALS_PER_DAY))
         log.info(f"[DAILY] 🗓️ New day {today} — lucky slots: {sorted(_lucky_deal_slots)}")
 
 def _is_lucky_deal() -> bool:
@@ -254,17 +311,10 @@ def _is_lucky_deal() -> bool:
 #  sent_original_text     : { sent_msg_id → original_text }
 #
 #  dealspouch_media_queue : FIFO deque of image_bytes|None
+#  dealspouch_time_queue  : FIFO deque of source timestamps (for freshness check)
 #
-#  ── IMAGE INTEGRITY GUARANTEE ─────────────────────────────────────────
-#  Every message sent to Dealspouch gets EXACTLY ONE entry pushed into
-#  dealspouch_media_queue at the same time (even if that entry is None).
-#
-#  On ExtraPe reply:
-#    reply_to MATCHED → use matched media_bytes             (correct image ✅)
-#    reply_to MISSED  → media_bytes = None, push None       (text-only, no mismatch ✅)
-#
-#  We NEVER pop oldest pending_media on a mismatch — that was the root
-#  cause of wrong images appearing on Amazon deals.
+#  IMAGE INTEGRITY: Never pop oldest on reply_to mismatch.
+#  FRESHNESS:       Drop deals older than MAX_DEAL_AGE_MINUTES at send time.
 # ══════════════════════════════════════════
 pending_media          = {}
 sent_links_store       = {}
@@ -450,6 +500,10 @@ async def send_to_whatsapp_single(text, target_group, image_bytes=None):
 
 # ══════════════════════════════════════════
 #  STEP 1: Source groups → Route by deal type
+#
+#  RATE LIMIT applied here — before any processing.
+#  CC_DIRECT_GROUP deals are exempt from rate limit
+#  (CC deals are low volume and time-sensitive).
 # ══════════════════════════════════════════
 @client.on(events.NewMessage(chats=SOURCE_GROUPS))
 async def handle_source(event):
@@ -467,7 +521,7 @@ async def handle_source(event):
     stats["deals_found"] += 1
     chat_id = event.chat_id
 
-    # ── CC DEAL — DIRECT GROUP (straight to WA, no bot) ──
+    # ── CC DEAL — DIRECT GROUP (exempt from rate limit, straight to WA) ──
     if cc_deal and chat_id == CC_DIRECT_GROUP:
         log.info(f"[CC-DIRECT] 💳 CC Deal #{stats['deals_found']} from direct group!")
         media_bytes = await download_media_bytes(event.message)
@@ -498,6 +552,16 @@ async def handle_source(event):
     if len(source_seen_hashes) > 500:
         source_seen_hashes.pop()
 
+    # ── OPTION 1: Rate limit check (after dedup, before processing) ──
+    # CC deals from other groups are also exempt — they are rare and valuable.
+    if not cc_deal and not _is_rate_allowed():
+        stats["rate_dropped"] += 1
+        return
+
+    # Record source timestamp for freshness check later (Amazon deals only)
+    # We push this into dealspouch_time_queue alongside media in handle_extrape
+    source_ts = time.time()
+
     # ── CC DEAL — OTHER GROUPS → ExtraPe ──
     if cc_deal and chat_id != CC_DIRECT_GROUP:
         log.info(f"[CC-EXTRAPE] 💳 CC Deal #{stats['deals_found']} from group {chat_id} → ExtraPe")
@@ -506,6 +570,8 @@ async def handle_source(event):
         clean_text     = sanitize_text_for_bot(text)
         sent = await client.send_message(EXTRAPE_BOT, clean_text)
         _store_deal(sent.id, media_bytes, original_links, is_cc=True, original_text=clean_text)
+        # Store source timestamp on the deal so we can check freshness later
+        sent_links_store[sent.id]["source_ts"] = source_ts
         stats["sent_to_extrape"] += 1
         log.info(f"[CC-EXTRAPE] 📤 Sent to ExtraPe (CC=True, msg_id={sent.id})")
         return
@@ -518,6 +584,8 @@ async def handle_source(event):
     clean_text     = sanitize_text_for_bot(text)
     sent = await client.send_message(EXTRAPE_BOT, clean_text)
     _store_deal(sent.id, media_bytes, original_links, is_cc=False, original_text=clean_text)
+    # Store source timestamp on the deal
+    sent_links_store[sent.id]["source_ts"] = source_ts
     stats["sent_to_extrape"] += 1
     log.info(f"[EXTRAPE] 📤 Sent to ExtraPe (CC=False, msg_id={sent.id})")
 
@@ -575,42 +643,34 @@ async def handle_extrape(event):
         extrape_seen_hashes.pop()
 
     # ══════════════════════════════════════════
-    #  FETCH MEDIA + CC FLAG
+    #  FETCH MEDIA + CC FLAG + SOURCE TIMESTAMP
     #
-    #  IMAGE INTEGRITY RULE:
-    #  ✅ reply_to MATCHED → use exact media from that deal's store entry
-    #  ❌ reply_to MISSED  → media_bytes = None (NO oldest-pop fallback)
-    #
-    #  Popping oldest pending_media on mismatch = wrong image on deals.
-    #  Text-only is always safer than a mismatched image.
-    #
-    #  For Amazon deals: we push media_bytes (or None) to
-    #  dealspouch_media_queue right after sending to Dealspouch.
-    #  One push per send keeps the FIFO perfectly in sync.
+    #  IMAGE INTEGRITY: Never pop oldest on reply_to mismatch.
+    #  FRESHNESS: Carry source_ts forward into dealspouch queues.
     # ══════════════════════════════════════════
     media_bytes   = None
     pending_is_cc = False
+    source_ts     = time.time()   # fallback: use now (conservative — won't be stale)
 
     if replied_to_id and replied_to_id in pending_media:
-        # ✅ Exact match — correct image and CC flag guaranteed
+        # ✅ Exact match
         media_bytes   = pending_media.get(replied_to_id)
-        pending_is_cc = sent_links_store.get(replied_to_id, {}).get("is_cc", False)
+        store_entry   = sent_links_store.get(replied_to_id, {})
+        pending_is_cc = store_entry.get("is_cc", False)
+        source_ts     = store_entry.get("source_ts", time.time())
         _cleanup_store(replied_to_id)
         log.info(
             f"[EXTRAPE] ✅ Matched reply_to_id={replied_to_id} | "
-            f"cc={pending_is_cc} | image={'yes' if media_bytes else 'no'}"
+            f"cc={pending_is_cc} | image={'yes' if media_bytes else 'no'} | "
+            f"age={(time.time()-source_ts)/60:.1f}min"
         )
     else:
         # ❌ No match — DO NOT pop oldest (prevents image mismatch)
         log.warning(
-            "[EXTRAPE] ⚠️ No reply_to match — will try ExtraPe's own image only "
-            "(safe: avoids attaching wrong deal's image)"
+            "[EXTRAPE] ⚠️ No reply_to match — will try ExtraPe's own image only"
         )
-        # media_bytes stays None, pending_is_cc stays False
 
-    # ── Fallback: ExtraPe reply's own attached image ──
-    # Safe — ExtraPe only attaches an image for the deal it just converted,
-    # so this cannot be a different deal's image.
+    # ── Fallback: ExtraPe reply's own attached image (safe, deal-specific) ──
     if not media_bytes:
         media_bytes = await download_media_bytes(event.message)
         if media_bytes:
@@ -653,15 +713,16 @@ async def handle_extrape(event):
         log.info(f"[EXTRAPE] ✅ AMZ converted → Dealspouch | image={'yes' if media_bytes else 'no'}")
         await client.send_message(DEALSPOUCH_BOT, text)
 
-        # ✅ ALWAYS push one entry to FIFO queue — even if None.
-        #    One push per send keeps queue perfectly in sync with Dealspouch replies.
-        #    None entry = text-only deal (correct), not a mismatched image.
+        # Push image + timestamp together (both FIFOs stay in sync)
         dealspouch_media_queue.append(media_bytes)
+        dealspouch_time_queue.append(source_ts)
         if len(dealspouch_media_queue) > 20:
             dealspouch_media_queue.popleft()
+            dealspouch_time_queue.popleft()
         log.info(
-            f"[DEALSPOUCH-QUEUE] 📥 Pushed image={'yes' if media_bytes else 'no (text-only)'} "
-            f"| queue size: {len(dealspouch_media_queue)}"
+            f"[DEALSPOUCH-QUEUE] 📥 Pushed image={'yes' if media_bytes else 'no'} | "
+            f"age={(time.time()-source_ts)/60:.1f}min | "
+            f"queue size: {len(dealspouch_media_queue)}"
         )
         stats["amz_sent_to_dealspouch"] += 1
         return
@@ -672,10 +733,10 @@ async def handle_extrape(event):
 # ══════════════════════════════════════════
 #  STEP 3: Dealspouch → TG + WA bulk  (Amazon only)
 #
-#  FIFO guarantees correct image per deal:
-#  • One push to queue per Dealspouch send (in handle_extrape)
-#  • One popleft() here per Dealspouch reply
-#  • None entry → text-only (intentional, safe)
+#  OPTION 2 — FRESHNESS CHECK applied here.
+#  We pop the source timestamp from dealspouch_time_queue (FIFO, in sync
+#  with dealspouch_media_queue). If the deal is older than
+#  MAX_DEAL_AGE_MINUTES, it is dropped silently — never sent to TG or WA.
 # ══════════════════════════════════════════
 @client.on(events.NewMessage(chats=DEALSPOUCH_BOT))
 async def handle_dealspouch(event):
@@ -694,20 +755,36 @@ async def handle_dealspouch(event):
         return
     last_dealspouch_handled = now
 
-    # ✅ Pop from FIFO queue — exact image for this deal, in order
+    # ✅ Pop image from FIFO queue
     media_bytes = None
     if dealspouch_media_queue:
         media_bytes = dealspouch_media_queue.popleft()
         log.info(
             f"[DEALSPOUCH] ✅ Popped from queue | "
-            f"image={'yes' if media_bytes else 'no (text-only)'} | "
+            f"image={'yes' if media_bytes else 'no'} | "
             f"remaining={len(dealspouch_media_queue)}"
         )
     else:
-        log.warning("[DEALSPOUCH] ⚠️ Queue empty — sending text only")
+        log.warning("[DEALSPOUCH] ⚠️ Media queue empty — sending text only")
+
+    # ── OPTION 2: Freshness check — pop matching timestamp ──
+    source_ts = None
+    if dealspouch_time_queue:
+        source_ts = dealspouch_time_queue.popleft()
+        age_minutes = (time.time() - source_ts) / 60
+        log.info(f"[FRESHNESS] 🕐 Deal age: {age_minutes:.1f} min (max allowed: {MAX_DEAL_AGE_MINUTES} min)")
+        if age_minutes > MAX_DEAL_AGE_MINUTES:
+            log.info(
+                f"[FRESHNESS] 🗑️ Deal is {age_minutes:.1f} min old — "
+                f"exceeds {MAX_DEAL_AGE_MINUTES} min limit → DROPPED"
+            )
+            stats["stale_dropped"] += 1
+            return
+    else:
+        log.warning("[FRESHNESS] ⚠️ Time queue empty — skipping freshness check")
 
     ist_now = get_ist_now()
-    log.info(f"[DEALSPOUCH] ✅ Valid! IST: {ist_now.strftime('%H:%M')} | image={'yes' if media_bytes else 'no'}")
+    log.info(f"[DEALSPOUCH] ✅ Fresh deal! IST: {ist_now.strftime('%H:%M')} | image={'yes' if media_bytes else 'no'}")
 
     # ── Lucky deal: replace dealspouch link with WA invite ──
     if _is_lucky_deal():
@@ -743,16 +820,18 @@ async def run():
             me = await client.get_me()
             log.info(f"✅ Logged in as: {me.first_name} (@{me.username})")
             log.info(f"👂 Watching {len(SOURCE_GROUPS)} source group(s)")
-            log.info(f"💳 CC Direct Group: {CC_DIRECT_GROUP}  ← no bot")
-            log.info(f"🤖 ExtraPe Bot   : {EXTRAPE_BOT}  ← Amazon + Flipkart + CC (other groups)")
-            log.info(f"🤖 EarnKaro Bot  : {EARNKARO_BOT}  ← fallback when ExtraPe fails")
-            log.info(f"🤖 Dealspouch Bot: {DEALSPOUCH_BOT}  ← Amazon only")
-            log.info(f"📢 TG Group      : {MY_TG_GROUP}")
-            log.info(f"📲 FK WA Group   : {FK_WA_GROUP}")
-            log.info(f"📲 CC WA Group   : {CC_WA_GROUP}")
-            log.info(f"📲 WA Sender     : {BAILEYS_URL or 'NOT SET'}")
-            log.info(f"🎯 Lucky deals/day: {LUCKY_DEALS_PER_DAY} (WA invite replaces dealspouch link)")
-            log.info(f"📌 TG Bot Footer : {TG_BOT_FOOTER.strip()}")
+            log.info(f"💳 CC Direct Group : {CC_DIRECT_GROUP}  ← no bot, rate-limit exempt")
+            log.info(f"🤖 ExtraPe Bot     : {EXTRAPE_BOT}  ← Amazon + Flipkart + CC (other groups)")
+            log.info(f"🤖 EarnKaro Bot    : {EARNKARO_BOT}  ← fallback when ExtraPe fails")
+            log.info(f"🤖 Dealspouch Bot  : {DEALSPOUCH_BOT}  ← Amazon only")
+            log.info(f"📢 TG Group        : {MY_TG_GROUP}")
+            log.info(f"📲 FK WA Group     : {FK_WA_GROUP}")
+            log.info(f"📲 CC WA Group     : {CC_WA_GROUP}")
+            log.info(f"📲 WA Sender       : {BAILEYS_URL or 'NOT SET'}")
+            log.info(f"🚦 Rate limit      : {MAX_DEALS_PER_HOUR} Amazon/FK deals per hour (CC exempt)")
+            log.info(f"⏱️  Freshness limit : drop Amazon deals older than {MAX_DEAL_AGE_MINUTES} min")
+            log.info(f"🎯 Lucky deals/day : {LUCKY_DEALS_PER_DAY} (WA invite replaces dealspouch link)")
+            log.info(f"📌 TG Bot Footer   : {TG_BOT_FOOTER.strip()}")
             log.info("⏳ Waiting for deals...\n")
             await client.run_until_disconnected()
         except Exception as e:
