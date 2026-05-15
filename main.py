@@ -375,7 +375,7 @@ stats = {
     "fashion_sent_to_extrape": 0,
     "fashion_sent_direct_wa": 0,
     "fashion_finnin_direct": 0,
-    "beauty_finnin_direct": 0
+    "beauty_finnin_direct": 0,
     "beauty_sent_to_extrape": 0,
     "beauty_sent_direct_wa": 0,
 }
