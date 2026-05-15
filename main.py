@@ -686,7 +686,7 @@ async def handle_source(event):
     # ══════════════════════════════════════
     #  FASHION SOURCE GROUP → ExtraPe  ← NEW
     # ══════════════════════════════════════
-    if chat_id in SOURCE_GROUPS::
+    if chat_id in SOURCE_GROUPS:
         if not is_fashion_deal(text):
             return
         log.info(f"[FASHION-SOURCE] 👗 Fashion deal found → ExtraPe")
@@ -702,7 +702,7 @@ async def handle_source(event):
     # ══════════════════════════════════════
     #  BEAUTY SOURCE GROUP → ExtraPe  ← NEW
     # ══════════════════════════════════════
-    if chat_id in SOURCE_GROUPS::
+    if chat_id in SOURCE_GROUPS:
         if not is_beauty_deal(text):
             return
         log.info(f"[BEAUTY-SOURCE] 💄 Beauty deal found → ExtraPe")
