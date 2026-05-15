@@ -688,7 +688,6 @@ async def handle_source(event):
     # ══════════════════════════════════════
     if chat_id in SOURCE_GROUPS:
         if not is_fashion_deal(text):
-            return
         log.info(f"[FASHION-SOURCE] 👗 Fashion deal found → ExtraPe")
         media_bytes    = await download_media_bytes(event.message)
         original_links = extract_all_links(text)
@@ -704,7 +703,6 @@ async def handle_source(event):
     # ══════════════════════════════════════
     if chat_id in SOURCE_GROUPS:
         if not is_beauty_deal(text):
-            return
         log.info(f"[BEAUTY-SOURCE] 💄 Beauty deal found → ExtraPe")
         media_bytes    = await download_media_bytes(event.message)
         original_links = extract_all_links(text)
