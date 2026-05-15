@@ -252,10 +252,11 @@ FASHION_KEYWORDS = re.compile(
     re.IGNORECASE
 )
 
-def is_fashion_deal(text: str) -> bool:
-    if not text:
-        return False
-    return bool(FASHION_KEYWORDS.search(text))
+def is_fashion_deal(text: str):
+    match = bool(FASHION_KEYWORDS.search(text))
+    print("Fashion:", match, text[:100])
+    return match
+
 
 # ══════════════════════════════════════════
 #  BEAUTY DEAL DETECTION  ← NEW
@@ -304,10 +305,10 @@ BEAUTY_KEYWORDS = re.compile(
     re.IGNORECASE
 )
 
-def is_beauty_deal(text: str) -> bool:
-    if not text:
-        return False
-    return bool(BEAUTY_KEYWORDS.search(text))
+def is_beauty_deal(text):
+    match = bool(BEAUTY_KEYWORDS.search(text))
+    print("Beauty:", match, text[:100])
+    return match
 
 # ══════════════════════════════════════════
 #  NON-AMAZON/FK LINK DETECTOR  ← NEW
@@ -374,6 +375,7 @@ stats = {
     "fashion_sent_to_extrape": 0,
     "fashion_sent_direct_wa": 0,
     "fashion_finnin_direct": 0,
+    "beauty_finnin_direct": 0
     "beauty_sent_to_extrape": 0,
     "beauty_sent_direct_wa": 0,
 }
@@ -653,7 +655,7 @@ async def handle_source(event):
     # ══════════════════════════════════════
     #  FINNIN DEALS GROUP → Fashion direct to WA  ← NEW
     # ══════════════════════════════════════
-    if chat_id == MY_TG_GROUP:
+    if chat_id == -1001481951196:
         if not is_fashion_deal(text):
             return
         log.info(f"[FINNIN] 👗 Fashion deal from Finnin TG group — sending direct to Fashion WA")
@@ -667,7 +669,7 @@ async def handle_source(event):
             log.info("[FINNIN] ✅ Sent directly to Fashion WA group")
         return
 
-    if chat_id == MY_TG_GROUP:
+    if chat_id == -1001481951196:
         if not is_beauty_deal(text):
             return
         log.info(f"[FINNIN] 👗 Beauty deal from Finnin TG group — sending direct to Beauty WA")
@@ -684,7 +686,7 @@ async def handle_source(event):
     # ══════════════════════════════════════
     #  FASHION SOURCE GROUP → ExtraPe  ← NEW
     # ══════════════════════════════════════
-    if chat_id == SOURCE_GROUPS:
+    if chat_id in SOURCE_GROUPS::
         if not is_fashion_deal(text):
             return
         log.info(f"[FASHION-SOURCE] 👗 Fashion deal found → ExtraPe")
@@ -700,7 +702,7 @@ async def handle_source(event):
     # ══════════════════════════════════════
     #  BEAUTY SOURCE GROUP → ExtraPe  ← NEW
     # ══════════════════════════════════════
-    if chat_id == SOURCE_GROUPS:
+    if chat_id in SOURCE_GROUPS::
         if not is_beauty_deal(text):
             return
         log.info(f"[BEAUTY-SOURCE] 💄 Beauty deal found → ExtraPe")
