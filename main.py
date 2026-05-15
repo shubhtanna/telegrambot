@@ -869,75 +869,138 @@ async def handle_extrape(event):
     #  FASHION PIPELINE  ← NEW
     # ══════════════════════════════════════════
     if deal_type == "fashion":
-        if is_quiet_hours():
-            log.info(f"[FASHION] 🌙 Quiet hours — skipping fashion deal")
-            stats["ignored"] += 1
-            return
+        # if is_quiet_hours():
+        #     log.info(f"[FASHION] 🌙 Quiet hours — skipping fashion deal")
+        #     stats["ignored"] += 1
+        #     return
 
         amz_links = extract_amazon_links(text)
-        fk_links  = extract_flipkart_links(text)
-        other_links = extract_non_amz_fk_links(text)
+        media_bytes = media_bytes
 
-        if amz_links:
-            # Amazon fashion → Dealspouch → Fashion WA group (via handle_dealspouch_fashion)
-            log.info(f"[FASHION] ✅ AMZ fashion → Dealspouch | image={'yes' if media_bytes else 'no'}")
-            _purge_stale_fashion_queue()
-            dealspouch_send_ts = time.time()
-            await client.send_message(DEALSPOUCH_BOT, text)
-            fashion_dealspouch_media_queue.append(media_bytes)
-            fashion_dealspouch_time_queue.append(dealspouch_send_ts)
-            if len(fashion_dealspouch_media_queue) > 20:
-                fashion_dealspouch_media_queue.popleft()
-                fashion_dealspouch_time_queue.popleft()
-            stats["fashion_sent_to_extrape"] += 1
-            log.info(f"[FASHION] 📤 Queued to Dealspouch | queue={len(fashion_dealspouch_media_queue)}")
+    if amz_links:
 
-        elif fk_links or other_links:
-            # Non-Amazon fashion (Flipkart, Myntra, Ajio, etc.) → direct to Fashion WA group
-            log.info(f"[FASHION] 🛒 Non-AMZ fashion → direct Fashion WA | image={'yes' if media_bytes else 'no'}")
-            await send_to_whatsapp_single(text, FASHION_WA_GROUP, media_bytes)
-            stats["fashion_sent_direct_wa"] += 1
-        else:
-            log.info("[FASHION] ⏭️ No recognisable link in fashion reply — ignored")
-            stats["ignored"] += 1
-        return
+        log.info(
+            "[FASHION] Amazon → Dealspouch queue"
+        )
+
+        await client.send_message(
+            DEALSPOUCH_BOT,
+            text
+        )
+
+        fashion_dealspouch_media_queue.append(
+            media_bytes
+        )
+
+        fashion_dealspouch_time_queue.append(
+            time.time()
+        )
+
+    else:
+
+        log.info(
+            "[FASHION] Non-AMZ → Fashion WA"
+        )
+
+        await send_to_whatsapp_single(
+            text,
+            FASHION_WA_GROUP,
+            media_bytes
+        )
+
+    return
+
+        # amz_links = extract_amazon_links(text)
+        # fk_links  = extract_flipkart_links(text)
+        # other_links = extract_non_amz_fk_links(text)
+
+        # if amz_links:
+        #     # Amazon fashion → Dealspouch → Fashion WA group (via handle_dealspouch_fashion)
+        #     log.info(f"[FASHION] ✅ AMZ fashion → Dealspouch | image={'yes' if media_bytes else 'no'}")
+        #     _purge_stale_fashion_queue()
+        #     dealspouch_send_ts = time.time()
+        #     await client.send_message(DEALSPOUCH_BOT, text)
+        #     fashion_dealspouch_media_queue.append(media_bytes)
+        #     fashion_dealspouch_time_queue.append(dealspouch_send_ts)
+        #     if len(fashion_dealspouch_media_queue) > 20:
+        #         fashion_dealspouch_media_queue.popleft()
+        #         fashion_dealspouch_time_queue.popleft()
+        #     stats["fashion_sent_to_extrape"] += 1
+        #     log.info(f"[FASHION] 📤 Queued to Dealspouch | queue={len(fashion_dealspouch_media_queue)}")
+
+        # elif fk_links or other_links:
+        #     # Non-Amazon fashion (Flipkart, Myntra, Ajio, etc.) → direct to Fashion WA group
+        #     log.info(f"[FASHION] 🛒 Non-AMZ fashion → direct Fashion WA | image={'yes' if media_bytes else 'no'}")
+        #     await send_to_whatsapp_single(text, FASHION_WA_GROUP, media_bytes)
+        #     stats["fashion_sent_direct_wa"] += 1
+        # else:
+        #     log.info("[FASHION] ⏭️ No recognisable link in fashion reply — ignored")
+        #     stats["ignored"] += 1
+        # return
 
     # ══════════════════════════════════════════
     #  BEAUTY PIPELINE  ← NEW
     # ══════════════════════════════════════════
     if deal_type == "beauty":
-        if is_quiet_hours():
-            log.info(f"[BEAUTY] 🌙 Quiet hours — skipping beauty deal")
-            stats["ignored"] += 1
-            return
+        # if is_quiet_hours():
+        #     log.info(f"[BEAUTY] 🌙 Quiet hours — skipping beauty deal")
+        #     stats["ignored"] += 1
+        #     return
 
-        amz_links   = extract_amazon_links(text)
-        fk_links    = extract_flipkart_links(text)
-        other_links = extract_non_amz_fk_links(text)
+        amz_links = extract_amazon_links(text)
 
-        if amz_links:
-            # Amazon beauty → Dealspouch → Beauty WA group
-            log.info(f"[BEAUTY] ✅ AMZ beauty → Dealspouch | image={'yes' if media_bytes else 'no'}")
-            _purge_stale_beauty_queue()
-            dealspouch_send_ts = time.time()
-            await client.send_message(DEALSPOUCH_BOT, text)
-            beauty_dealspouch_media_queue.append(media_bytes)
-            beauty_dealspouch_time_queue.append(dealspouch_send_ts)
-            if len(beauty_dealspouch_media_queue) > 20:
-                beauty_dealspouch_media_queue.popleft()
-                beauty_dealspouch_time_queue.popleft()
-            stats["beauty_sent_to_extrape"] += 1
-            log.info(f"[BEAUTY] 📤 Queued to Dealspouch | queue={len(beauty_dealspouch_media_queue)}")
+    if amz_links:
 
-        elif fk_links or other_links:
-            # Non-Amazon beauty → direct to Beauty WA group
-            log.info(f"[BEAUTY] 💄 Non-AMZ beauty → direct Beauty WA | image={'yes' if media_bytes else 'no'}")
-            await send_to_whatsapp_single(text, BEAUTY_WA_GROUP, media_bytes)
-            stats["beauty_sent_direct_wa"] += 1
-        else:
-            log.info("[BEAUTY] ⏭️ No recognisable link in beauty reply — ignored")
-            stats["ignored"] += 1
-        return
+        await client.send_message(
+            DEALSPOUCH_BOT,
+            text
+        )
+
+        beauty_dealspouch_media_queue.append(
+            media_bytes
+        )
+
+        beauty_dealspouch_time_queue.append(
+            time.time()
+        )
+
+    else:
+
+        await send_to_whatsapp_single(
+            text,
+            BEAUTY_WA_GROUP,
+            media_bytes
+        )
+
+    return
+
+        # amz_links   = extract_amazon_links(text)
+        # fk_links    = extract_flipkart_links(text)
+        # other_links = extract_non_amz_fk_links(text)
+
+        # if amz_links:
+        #     # Amazon beauty → Dealspouch → Beauty WA group
+        #     log.info(f"[BEAUTY] ✅ AMZ beauty → Dealspouch | image={'yes' if media_bytes else 'no'}")
+        #     _purge_stale_beauty_queue()
+        #     dealspouch_send_ts = time.time()
+        #     await client.send_message(DEALSPOUCH_BOT, text)
+        #     beauty_dealspouch_media_queue.append(media_bytes)
+        #     beauty_dealspouch_time_queue.append(dealspouch_send_ts)
+        #     if len(beauty_dealspouch_media_queue) > 20:
+        #         beauty_dealspouch_media_queue.popleft()
+        #         beauty_dealspouch_time_queue.popleft()
+        #     stats["beauty_sent_to_extrape"] += 1
+        #     log.info(f"[BEAUTY] 📤 Queued to Dealspouch | queue={len(beauty_dealspouch_media_queue)}")
+
+        # elif fk_links or other_links:
+        #     # Non-Amazon beauty → direct to Beauty WA group
+        #     log.info(f"[BEAUTY] 💄 Non-AMZ beauty → direct Beauty WA | image={'yes' if media_bytes else 'no'}")
+        #     await send_to_whatsapp_single(text, BEAUTY_WA_GROUP, media_bytes)
+        #     stats["beauty_sent_direct_wa"] += 1
+        # else:
+        #     log.info("[BEAUTY] ⏭️ No recognisable link in beauty reply — ignored")
+        #     stats["ignored"] += 1
+        # return
 
     # ── CC deal → CC WA group ──
     if pending_is_cc or is_cc_deal(text):
@@ -1014,12 +1077,29 @@ async def handle_dealspouch(event):
         return
     last_dealspouch_handled = now
 
-    # ── Check if this reply belongs to fashion or beauty queue first ──
-    if fashion_dealspouch_time_queue and not dealspouch_time_queue:
-        await _route_dealspouch_fashion(text)
+    # # ── Check if this reply belongs to fashion or beauty queue first ──
+    # if fashion_dealspouch_time_queue and not dealspouch_time_queue:
+    #     await _route_dealspouch_fashion(text)
+    #     return
+    # if beauty_dealspouch_time_queue and not dealspouch_time_queue:
+    #     await _route_dealspouch_beauty(text)
+    #     return
+
+    if fashion_dealspouch_time_queue:
+
+        await _route_dealspouch_fashion(
+            text
+        )
+
         return
-    if beauty_dealspouch_time_queue and not dealspouch_time_queue:
-        await _route_dealspouch_beauty(text)
+
+
+    if beauty_dealspouch_time_queue:
+
+        await _route_dealspouch_beauty(
+            text
+        )
+
         return
 
     # ── Generic Amazon pipeline ──
