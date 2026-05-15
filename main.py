@@ -877,38 +877,38 @@ async def handle_extrape(event):
         amz_links = extract_amazon_links(text)
         media_bytes = media_bytes
 
-    if amz_links:
+        if amz_links:
 
-        log.info(
-            "[FASHION] Amazon → Dealspouch queue"
-        )
+            log.info(
+                "[FASHION] Amazon → Dealspouch queue"
+            )
 
-        await client.send_message(
-            DEALSPOUCH_BOT,
-            text
-        )
+            await client.send_message(
+                DEALSPOUCH_BOT,
+                text
+            )
 
-        fashion_dealspouch_media_queue.append(
-            media_bytes
-        )
+            fashion_dealspouch_media_queue.append(
+                media_bytes
+            )
 
-        fashion_dealspouch_time_queue.append(
-            time.time()
-        )
+            fashion_dealspouch_time_queue.append(
+                time.time()
+            )
 
-    else:
+        else:
 
-        log.info(
-            "[FASHION] Non-AMZ → Fashion WA"
-        )
+            log.info(
+                "[FASHION] Non-AMZ → Fashion WA"
+            )
 
-        await send_to_whatsapp_single(
-            text,
-            FASHION_WA_GROUP,
-            media_bytes
-        )
+            await send_to_whatsapp_single(
+                text,
+                FASHION_WA_GROUP,
+                media_bytes
+            )
 
-    return
+        return
 
         # amz_links = extract_amazon_links(text)
         # fk_links  = extract_flipkart_links(text)
@@ -949,30 +949,30 @@ async def handle_extrape(event):
 
         amz_links = extract_amazon_links(text)
 
-    if amz_links:
+        if amz_links:
 
-        await client.send_message(
-            DEALSPOUCH_BOT,
-            text
-        )
+            await client.send_message(
+                DEALSPOUCH_BOT,
+                text
+            )
 
-        beauty_dealspouch_media_queue.append(
-            media_bytes
-        )
+            beauty_dealspouch_media_queue.append(
+                media_bytes
+            )
 
-        beauty_dealspouch_time_queue.append(
-            time.time()
-        )
+            beauty_dealspouch_time_queue.append(
+                time.time()
+            )
 
-    else:
+        else:
 
-        await send_to_whatsapp_single(
-            text,
-            BEAUTY_WA_GROUP,
-            media_bytes
-        )
+            await send_to_whatsapp_single(
+                text,
+                BEAUTY_WA_GROUP,
+                media_bytes
+            )
 
-    return
+        return
 
         # amz_links   = extract_amazon_links(text)
         # fk_links    = extract_flipkart_links(text)
