@@ -2766,7 +2766,14 @@ def extract_all_links(text):
     return set(re.findall(r'https?://\S+', text))
 
 def has_dealspouch_link(text):
-    return bool(text) and "amaz.dealspouch.com" in text
+    if not text:
+        return False
+    lowered = text.lower()
+    return (
+        "dealspouch" in lowered
+        or "amaz.dealspouch.com" in lowered
+        or "www.dealspouch.com" in lowered
+    )
 
 def is_extrape_failure(text):
     if not text:
@@ -3354,10 +3361,13 @@ async def handle_dealspouch(event):
     text = event.message.text or event.message.caption or ""
 
     if not has_dealspouch_link(text):
-        stats["ignored"] += 1
-        log.info("[DEALSPOUCH] ⏭️ No dealspouch link — ignored")
-        _trace("DEALSPOUCH", route="no_dealspouch_link", action="ignored")
-        return
+        if not dealspouch_queue:
+            stats["ignored"] += 1
+            log.info("[DEALSPOUCH] ⏭️ No dealspouch link and no pending queue — ignored")
+            _trace("DEALSPOUCH", route="no_dealspouch_link", action="ignored")
+            return
+        log.warning("[DEALSPOUCH] ⚠️ No dealspouch link in reply, but pending queue exists — continuing")
+        _trace("DEALSPOUCH", route="no_dealspouch_link", action="continue_with_queue")
 
     now = time.time()
     if now - last_dealspouch_handled < DEALSPOUCH_COOLDOWN:
