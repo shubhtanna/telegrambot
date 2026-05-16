@@ -3190,6 +3190,8 @@ async def handle_extrape(event):
     pending_is_cc = False
     deal_type     = "generic"
     matched_id    = None
+    source_is_amazon = False
+    source_is_flipkart = False
 
     if replied_to_id and replied_to_id in pending_media:
         matched_id = replied_to_id
@@ -3201,6 +3203,10 @@ async def handle_extrape(event):
         entry         = sent_links_store.get(matched_id, {})
         pending_is_cc = entry.get("is_cc", False)
         deal_type     = entry.get("deal_type", "generic")
+        source_links  = entry.get("links") or set()
+        source_text   = " ".join(sorted(source_links))
+        source_is_amazon   = bool(extract_amazon_links(source_text))
+        source_is_flipkart = bool(extract_flipkart_links_source(source_text))
         _cleanup_store(matched_id)
         log.info(
             f"[EXTRAPE] ✅ Matched id={matched_id} | "
@@ -3241,14 +3247,14 @@ async def handle_extrape(event):
     # ════════════════════════════════════════════════════════════
     if deal_type == "fashion":
         log.info(f"[FASHION] ▶ Routing converted message | image={'yes' if media_bytes else 'no'}")
-        if extract_amazon_links(text):
+        if source_is_amazon or extract_amazon_links(text):
             # Amazon fashion → Dealspouch → Step 3 sends Fashion WA + TG + bulk
             log.info(f"[FASHION] ✅ AMZ → Dealspouch | image={'yes' if media_bytes else 'no'}")
             await _send_to_dealspouch(text, media_bytes, "fashion")
             stats["fashion_sent_to_extrape"] += 1
             _trace("EXTRAPE", route="fashion_amz_to_dealspouch", action="dispatch", matched=matched_id)
 
-        elif extract_flipkart_links(text):
+        elif source_is_flipkart or extract_flipkart_links(text):
             # Flipkart fashion → Fashion WA + FK WA group
             log.info(f"[FASHION] 🛒 FK → Fashion WA + FK WA | image={'yes' if media_bytes else 'no'}")
             if is_quiet_hours():
@@ -3278,14 +3284,14 @@ async def handle_extrape(event):
     # ════════════════════════════════════════════════════════════
     if deal_type == "beauty":
         log.info(f"[BEAUTY] ▶ Routing converted message | image={'yes' if media_bytes else 'no'}")
-        if extract_amazon_links(text):
+        if source_is_amazon or extract_amazon_links(text):
             # Amazon beauty → Dealspouch → Step 3 sends Beauty WA + TG + bulk
             log.info(f"[BEAUTY] ✅ AMZ → Dealspouch | image={'yes' if media_bytes else 'no'}")
             await _send_to_dealspouch(text, media_bytes, "beauty")
             stats["beauty_sent_to_extrape"] += 1
             _trace("EXTRAPE", route="beauty_amz_to_dealspouch", action="dispatch", matched=matched_id)
 
-        elif extract_flipkart_links(text):
+        elif source_is_flipkart or extract_flipkart_links(text):
             # Flipkart beauty → Beauty WA + FK WA group
             log.info(f"[BEAUTY] 🛒 FK → Beauty WA + FK WA | image={'yes' if media_bytes else 'no'}")
             if is_quiet_hours():
@@ -3337,7 +3343,7 @@ async def handle_extrape(event):
             _trace("EXTRAPE", route="generic_fk", action="wa_single", target=FK_WA_GROUP)
         return
 
-    if extract_amazon_links(text):
+    if source_is_amazon or extract_amazon_links(text):
         log.info(f"[EXTRAPE] ✅ AMZ → Dealspouch | image={'yes' if media_bytes else 'no'}")
         await _send_to_dealspouch(text, media_bytes, "generic")
         stats["amz_sent_to_dealspouch"] += 1
