@@ -2561,7 +2561,7 @@ GENERIC_SOURCE_GROUPS = [
 FASHION_WA_GROUP = "120363427489881847@g.us"
 BEAUTY_WA_GROUP  = "120363425518003162@g.us"    
 
-SOURCE_GROUPS = GENERIC_SOURCE_GROUPS + [FASHION_SOURCE_GROUP, BEAUTY_SOURCE_GROUP]
+SOURCE_GROUPS = GENERIC_SOURCE_GROUPS
 
 # ══════════════════════════════════════════
 #  FRESHNESS CHECK
@@ -2960,7 +2960,7 @@ async def handle_source(event):
         return
 
     # ── FASHION DEDICATED SOURCE GROUP ───────────────────────────
-    if chat_id == FASHION_SOURCE_GROUP:
+    if chat_id == GENERIC_SOURCE_GROUPS:
         if not is_fashion_deal(text):
             return
         log.info("[FASHION-SOURCE] 👗 Fashion deal → ExtraPe")
@@ -2975,7 +2975,7 @@ async def handle_source(event):
         return
 
     # ── BEAUTY DEDICATED SOURCE GROUP ────────────────────────────
-    if chat_id == BEAUTY_SOURCE_GROUP:
+    if chat_id == GENERIC_SOURCE_GROUPS:
         if not is_beauty_deal(text):
             return
         log.info("[BEAUTY-SOURCE] 💄 Beauty deal → ExtraPe")
@@ -3321,8 +3321,8 @@ async def run():
             log.info(f"✅ Logged in as: {me.first_name} (@{me.username})")
             log.info(f"👂 Watching {len(SOURCE_GROUPS)} source group(s)")
             log.info(f"💳 CC / Finnin Group  : {CC_DIRECT_GROUP}")
-            log.info(f"👗 Fashion Source     : {FASHION_SOURCE_GROUP}")
-            log.info(f"💄 Beauty Source      : {BEAUTY_SOURCE_GROUP}")
+            # log.info(f"👗 Fashion Source     : {FASHION_SOURCE_GROUP}")
+            # log.info(f"💄 Beauty Source      : {BEAUTY_SOURCE_GROUP}")
             log.info(f"🤖 ExtraPe Bot        : {EXTRAPE_BOT}")
             log.info(f"🤖 EarnKaro Bot       : {EARNKARO_BOT}")
             log.info(f"🤖 Dealspouch Bot     : {DEALSPOUCH_BOT}")
