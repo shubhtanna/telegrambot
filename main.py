@@ -2338,26 +2338,10 @@ async def handle_dealspouch(event):
     #     await _route_dealspouch_beauty(text)
     #     return
 
-    if fashion_dealspouch_time_queue:
-
-        await _route_dealspouch_fashion(
-            text
-        )
-
-        # return
-
-
-    if beauty_dealspouch_time_queue:
-
-        await _route_dealspouch_beauty(
-            text
-        )
-
-        # return
 
     # ── Generic Amazon pipeline ──
     media_bytes = None
-    deal_type = None
+    deal_type = "generic"
     if dealspouch_media_queue:
         queued = dealspouch_media_queue.popleft()
         if isinstance(queued, tuple):
@@ -2402,10 +2386,11 @@ async def handle_dealspouch(event):
     log.info(f"[DEALSPOUCH] ✅ Fresh deal! IST: {ist_now.strftime('%H:%M')} | image={'yes' if media_bytes else 'no'}")
 
     if deal_type == "fashion":
+        log.info("[FASHION] Dealspouch → Fashion WA")
         await send_to_whatsapp_single(text, FASHION_WA_GROUP, media_bytes)
         stats["fashion_sent_direct_wa"] += 1
-
-    if deal_type == "beauty":
+    elif deal_type == "beauty":
+        log.info("[BEAUTY] Dealspouch → Beauty WA")
         await send_to_whatsapp_single(text, BEAUTY_WA_GROUP, media_bytes)
         stats["beauty_sent_direct_wa"] += 1
 
