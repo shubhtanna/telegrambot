@@ -2564,6 +2564,10 @@ SOURCE_GROUPS = [
 MAX_DEAL_AGE_MINUTES = 10
 dealspouch_queue = collections.deque()
 
+# Pending mapping window for ExtraPe replies.
+PENDING_STORE_MAX = 200
+PENDING_TTL_SECONDS = 30 * 60
+
 # ══════════════════════════════════════════
 #  CC DEAL DETECTION
 # ══════════════════════════════════════════
@@ -2765,15 +2769,37 @@ def has_dealspouch_link(text):
     return bool(text) and "amaz.dealspouch.com" in text
 
 def is_extrape_failure(text):
-    return bool(text) and "will not be able to convert" in text.lower()
+    if not text:
+        return False
+    lowered = text.lower()
+    failure_markers = (
+        "will not be able to convert",
+        "unable to convert",
+        "cannot convert",
+        "can't convert",
+        "conversion failed",
+        "failed to convert",
+        "not supported",
+        "invalid link",
+    )
+    return any(marker in lowered for marker in failure_markers)
+
+def _normalize_text(text: str) -> str:
+    return re.sub(r'\s+', ' ', (text or '').strip().lower())
+
+def _trace(stage: str, **fields):
+    compact = " | ".join(f"{k}={v}" for k, v in fields.items())
+    log.info(f"[TRACE:{stage}] {compact}")
 
 def is_echo_of_sent(text):
-    if not sent_links_store: return False
-    reply_links = extract_all_links(text)
-    if not reply_links: return False
-    for entry in sent_links_store.values():
-        if reply_links & entry["links"]:
-            log.info("[EXTRAPE] 🔄 Echo detected — waiting for converted reply...")
+    if not sent_original_text:
+        return False
+    norm_reply = _normalize_text(text)
+    if not norm_reply:
+        return False
+    for original in sent_original_text.values():
+        if _normalize_text(original) == norm_reply:
+            log.info("[EXTRAPE] 🔄 Exact echo of our source message — waiting for converted reply")
             return True
     return False
 
@@ -2782,11 +2808,49 @@ def _cleanup_store(msg_id):
     sent_links_store.pop(msg_id, None)
     sent_original_text.pop(msg_id, None)
 
+def _purge_old_pending_store():
+    now = time.time()
+    stale_ids = []
+    for msg_id, entry in sent_links_store.items():
+        created_at = entry.get("created_at", now)
+        if now - created_at > PENDING_TTL_SECONDS:
+            stale_ids.append(msg_id)
+    for msg_id in stale_ids:
+        _cleanup_store(msg_id)
+    if stale_ids:
+        log.info(f"[STORE] 🧹 Purged {len(stale_ids)} stale pending mappings")
+
+def _match_pending_by_links(reply_text: str):
+    reply_links = extract_all_links(reply_text)
+    if not reply_links:
+        return None
+
+    best_id = None
+    best_score = (-1, -1.0)
+    for msg_id, entry in sent_links_store.items():
+        original_links = entry.get("links") or set()
+        overlap_count = len(reply_links & original_links)
+        if overlap_count <= 0:
+            continue
+        created_at = float(entry.get("created_at", 0.0))
+        score = (overlap_count, created_at)
+        if score > best_score:
+            best_score = score
+            best_id = msg_id
+
+    return best_id
+
 def _store_deal(msg_id, media_bytes, links, is_cc, text, deal_type="generic"):
+    _purge_old_pending_store()
     pending_media[msg_id]      = media_bytes
-    sent_links_store[msg_id]   = {"links": links, "is_cc": is_cc, "deal_type": deal_type}
+    sent_links_store[msg_id]   = {
+        "links": links,
+        "is_cc": is_cc,
+        "deal_type": deal_type,
+        "created_at": time.time(),
+    }
     sent_original_text[msg_id] = text
-    if len(sent_links_store) > 20:
+    if len(sent_links_store) > PENDING_STORE_MAX:
         _cleanup_store(next(iter(sent_links_store)))
 
 # ══════════════════════════════════════════
@@ -2930,10 +2994,12 @@ async def handle_source(event):
             media_bytes = await download_media_bytes(event.message)
             if is_quiet_hours():
                 log.info("[FINNIN] 🌙 Quiet hours — skipping"); stats["ignored"] += 1
+                _trace("SOURCE", route="finnin_fashion", action="skipped_quiet", chat=chat_id)
             else:
                 await send_to_whatsapp_single(text, FASHION_WA_GROUP, media_bytes)
                 stats["fashion_finnin_direct"] += 1
                 log.info("[FINNIN] ✅ Sent to Fashion WA")
+                _trace("SOURCE", route="finnin_fashion", action="wa_single", target=FASHION_WA_GROUP, chat=chat_id)
             return
 
         if beauty:
@@ -2941,10 +3007,12 @@ async def handle_source(event):
             media_bytes = await download_media_bytes(event.message)
             if is_quiet_hours():
                 log.info("[FINNIN] 🌙 Quiet hours — skipping"); stats["ignored"] += 1
+                _trace("SOURCE", route="finnin_beauty", action="skipped_quiet", chat=chat_id)
             else:
                 await send_to_whatsapp_single(text, BEAUTY_WA_GROUP, media_bytes)
                 stats["beauty_finnin_direct"] += 1
                 log.info("[FINNIN] ✅ Sent to Beauty WA")
+                _trace("SOURCE", route="finnin_beauty", action="wa_single", target=BEAUTY_WA_GROUP, chat=chat_id)
             return
 
         if cc:
@@ -2953,10 +3021,12 @@ async def handle_source(event):
             media_bytes = await download_media_bytes(event.message)
             if is_quiet_hours():
                 log.info("[CC-DIRECT] 🌙 Quiet hours — skipping"); stats["ignored"] += 1
+                _trace("SOURCE", route="finnin_cc", action="skipped_quiet", chat=chat_id)
             else:
                 await send_to_whatsapp_single(text, CC_WA_GROUP, media_bytes)
                 stats["cc_sent_direct"] += 1
                 log.info("[CC-DIRECT] ✅ Sent to CC WA")
+                _trace("SOURCE", route="finnin_cc", action="wa_single", target=CC_WA_GROUP, chat=chat_id)
             return
         return
 
@@ -2994,6 +3064,7 @@ async def handle_source(event):
                     is_cc=True, text=clean_text, deal_type="generic")
         stats["sent_to_extrape"] += 1
         log.info(f"[CC-EXTRAPE] 📤 Sent to ExtraPe (msg_id={sent.id})")
+        _trace("SOURCE", route="cc_to_extrape", action="dispatch", msg_id=sent.id, chat=chat_id)
         return
 
     # Priority 2: Fashion
@@ -3004,6 +3075,7 @@ async def handle_source(event):
                     is_cc=False, text=clean_text, deal_type="fashion")
         stats["fashion_sent_to_extrape"] += 1
         log.info(f"[FASHION-SOURCE] 📤 Sent to ExtraPe (msg_id={sent.id})")
+        _trace("SOURCE", route="fashion_to_extrape", action="dispatch", msg_id=sent.id, chat=chat_id)
         return
 
     # Priority 3: Beauty
@@ -3014,6 +3086,7 @@ async def handle_source(event):
                     is_cc=False, text=clean_text, deal_type="beauty")
         stats["beauty_sent_to_extrape"] += 1
         log.info(f"[BEAUTY-SOURCE] 📤 Sent to ExtraPe (msg_id={sent.id})")
+        _trace("SOURCE", route="beauty_to_extrape", action="dispatch", msg_id=sent.id, chat=chat_id)
         return
 
     # Priority 4: Generic Amazon / Flipkart
@@ -3024,6 +3097,7 @@ async def handle_source(event):
                 is_cc=False, text=clean_text, deal_type="generic")
     stats["sent_to_extrape"] += 1
     log.info(f"[EXTRAPE] 📤 Sent to ExtraPe (msg_id={sent.id})")
+    _trace("SOURCE", route="generic_to_extrape", action="dispatch", msg_id=sent.id, chat=chat_id)
 
 # ══════════════════════════════════════════
 #  STEP 2 — ExtraPe reply → route by deal_type
@@ -3056,6 +3130,8 @@ async def handle_extrape(event):
         replied_to_id = event.message.reply_to.reply_to_msg_id
         log.info(f"[EXTRAPE] 🔗 Reply to msg_id={replied_to_id}")
 
+    _purge_old_pending_store()
+
     # ── ExtraPe failure → EarnKaro (all deal types) ──────────────
     if is_extrape_failure(text):
         log.info("[EXTRAPE] ❌ Conversion failed → EarnKaro")
@@ -3063,7 +3139,12 @@ async def handle_extrape(event):
         if replied_to_id and replied_to_id in sent_original_text:
             original_text = sent_original_text[replied_to_id]
             _cleanup_store(replied_to_id)
-        elif sent_original_text:
+        else:
+            matched_id = _match_pending_by_links(text)
+            if matched_id and matched_id in sent_original_text:
+                original_text = sent_original_text[matched_id]
+                _cleanup_store(matched_id)
+        if not original_text and sent_original_text:
             oldest = next(iter(sent_original_text))
             original_text = sent_original_text[oldest]
             _cleanup_store(oldest)
@@ -3071,22 +3152,27 @@ async def handle_extrape(event):
             await client.send_message(EARNKARO_BOT, original_text)
             log.info("[EARNKARO] 📤 Forwarded to EarnKaro")
             stats["ignored"] += 1
+            _trace("EXTRAPE", route="failure_to_earnkaro", action="dispatch", target=EARNKARO_BOT)
         else:
             log.warning("[EARNKARO] ⚠️ No original text found")
+            _trace("EXTRAPE", route="failure_to_earnkaro", action="missing_original")
         return
 
     if is_echo_of_sent(text):
+        _trace("EXTRAPE", route="echo", action="ignored")
         return
 
     if replied_to_id and replied_to_id in extrape_processed_reply_ids:
         log.info(f"[EXTRAPE] ⏭️ reply_to_id={replied_to_id} already processed")
         stats["ignored"] += 1
+        _trace("EXTRAPE", route="duplicate_reply_id", action="ignored", reply_to=replied_to_id)
         return
 
     msg_hash = hash(text.strip())
     if msg_hash in extrape_seen_hashes:
         log.info("[EXTRAPE] ⏭️ Exact duplicate — ignored")
         stats["ignored"] += 1
+        _trace("EXTRAPE", route="duplicate_text", action="ignored")
         return
     extrape_seen_hashes.add(msg_hash)
     if len(extrape_seen_hashes) > 50:
@@ -3096,19 +3182,27 @@ async def handle_extrape(event):
     media_bytes   = None
     pending_is_cc = False
     deal_type     = "generic"
+    matched_id    = None
 
     if replied_to_id and replied_to_id in pending_media:
-        media_bytes   = pending_media[replied_to_id]
-        entry         = sent_links_store.get(replied_to_id, {})
+        matched_id = replied_to_id
+    if not matched_id:
+        matched_id = _match_pending_by_links(text)
+
+    if matched_id and matched_id in pending_media:
+        media_bytes   = pending_media[matched_id]
+        entry         = sent_links_store.get(matched_id, {})
         pending_is_cc = entry.get("is_cc", False)
         deal_type     = entry.get("deal_type", "generic")
-        _cleanup_store(replied_to_id)
+        _cleanup_store(matched_id)
         log.info(
-            f"[EXTRAPE] ✅ Matched id={replied_to_id} | "
+            f"[EXTRAPE] ✅ Matched id={matched_id} | "
             f"deal_type={deal_type} | image={'yes' if media_bytes else 'no'}"
         )
+        if replied_to_id is None:
+            log.info("[EXTRAPE] 🧭 Correlated by link-overlap fallback (no reply_to)")
     else:
-        log.warning("[EXTRAPE] ⚠️ No reply_to match — using ExtraPe's own image if any")
+        log.warning("[EXTRAPE] ⚠️ No pending match — using ExtraPe's own image and fallback routing")
 
     if not media_bytes:
         media_bytes = await download_media_bytes(event.message)
@@ -3120,69 +3214,93 @@ async def handle_extrape(event):
         extrape_processed_reply_ids.add(replied_to_id)
         if len(extrape_processed_reply_ids) > 100:
             extrape_processed_reply_ids.pop()
+    if matched_id and matched_id != replied_to_id:
+        extrape_processed_reply_ids.add(matched_id)
+        if len(extrape_processed_reply_ids) > 100:
+            extrape_processed_reply_ids.pop()
+
+    if deal_type == "generic" and not pending_is_cc:
+        looks_fashion = is_fashion_deal(text)
+        looks_beauty = is_beauty_deal(text)
+        if looks_fashion and not looks_beauty:
+            deal_type = "fashion"
+            log.warning("[EXTRAPE] 🧩 Fallback inferred deal_type=fashion from converted text")
+        elif looks_beauty and not looks_fashion:
+            deal_type = "beauty"
+            log.warning("[EXTRAPE] 🧩 Fallback inferred deal_type=beauty from converted text")
 
     # ════════════════════════════════════════════════════════════
     #  FASHION PIPELINE
     # ════════════════════════════════════════════════════════════
     if deal_type == "fashion":
-        log.info(f"[FASHION] 🛒 FK → Fashion WA(SHubhunhunh) + FK WA | image={'yes' if media_bytes else 'no'}")
+        log.info(f"[FASHION] ▶ Routing converted message | image={'yes' if media_bytes else 'no'}")
         if extract_amazon_links(text):
             # Amazon fashion → Dealspouch → Step 3 sends Fashion WA + TG + bulk
             log.info(f"[FASHION] ✅ AMZ → Dealspouch | image={'yes' if media_bytes else 'no'}")
             await _send_to_dealspouch(text, media_bytes, "fashion")
             stats["fashion_sent_to_extrape"] += 1
+            _trace("EXTRAPE", route="fashion_amz_to_dealspouch", action="dispatch", matched=matched_id)
 
         elif extract_flipkart_links(text):
             # Flipkart fashion → Fashion WA + FK WA group
             log.info(f"[FASHION] 🛒 FK → Fashion WA + FK WA | image={'yes' if media_bytes else 'no'}")
             if is_quiet_hours():
                 log.info("[FASHION] 🌙 Quiet hours — skipping"); stats["ignored"] += 1
+                _trace("EXTRAPE", route="fashion_fk", action="skipped_quiet")
             else:
                 await send_to_whatsapp_single(text, FASHION_WA_GROUP, media_bytes)
                 await send_to_whatsapp_single(text, FK_WA_GROUP, media_bytes)
                 stats["fashion_sent_direct_wa"] += 1
                 stats["fk_sent_to_wa"] += 1
+                _trace("EXTRAPE", route="fashion_fk", action="wa_dual", targets=f"{FASHION_WA_GROUP},{FK_WA_GROUP}")
 
         else:
             # Other platforms (Myntra, Ajio, etc.) → Fashion WA only
             log.info(f"[FASHION] 🌐 Other → Fashion WA only | image={'yes' if media_bytes else 'no'}")
             if is_quiet_hours():
                 log.info("[FASHION] 🌙 Quiet hours — skipping"); stats["ignored"] += 1
+                _trace("EXTRAPE", route="fashion_other", action="skipped_quiet")
             else:
                 await send_to_whatsapp_single(text, FASHION_WA_GROUP, media_bytes)
                 stats["fashion_sent_direct_wa"] += 1
+                _trace("EXTRAPE", route="fashion_other", action="wa_single", target=FASHION_WA_GROUP)
         return
 
     # ════════════════════════════════════════════════════════════
     #  BEAUTY PIPELINE
     # ════════════════════════════════════════════════════════════
     if deal_type == "beauty":
-        log.info(f"[FASHION] 🛒 FK → Fashion WA(beautyyyyy) + FK WA | image={'yes' if media_bytes else 'no'}")
+        log.info(f"[BEAUTY] ▶ Routing converted message | image={'yes' if media_bytes else 'no'}")
         if extract_amazon_links(text):
             # Amazon beauty → Dealspouch → Step 3 sends Beauty WA + TG + bulk
             log.info(f"[BEAUTY] ✅ AMZ → Dealspouch | image={'yes' if media_bytes else 'no'}")
             await _send_to_dealspouch(text, media_bytes, "beauty")
             stats["beauty_sent_to_extrape"] += 1
+            _trace("EXTRAPE", route="beauty_amz_to_dealspouch", action="dispatch", matched=matched_id)
 
         elif extract_flipkart_links(text):
             # Flipkart beauty → Beauty WA + FK WA group
             log.info(f"[BEAUTY] 🛒 FK → Beauty WA + FK WA | image={'yes' if media_bytes else 'no'}")
             if is_quiet_hours():
                 log.info("[BEAUTY] 🌙 Quiet hours — skipping"); stats["ignored"] += 1
+                _trace("EXTRAPE", route="beauty_fk", action="skipped_quiet")
             else:
                 await send_to_whatsapp_single(text, BEAUTY_WA_GROUP, media_bytes)
                 await send_to_whatsapp_single(text, FK_WA_GROUP, media_bytes)
                 stats["beauty_sent_direct_wa"] += 1
                 stats["fk_sent_to_wa"] += 1
+                _trace("EXTRAPE", route="beauty_fk", action="wa_dual", targets=f"{BEAUTY_WA_GROUP},{FK_WA_GROUP}")
 
         else:
             # Other platforms (Nykaa, Purplle, etc.) → Beauty WA only
             log.info(f"[BEAUTY] 🌐 Other → Beauty WA only | image={'yes' if media_bytes else 'no'}")
             if is_quiet_hours():
                 log.info("[BEAUTY] 🌙 Quiet hours — skipping"); stats["ignored"] += 1
+                _trace("EXTRAPE", route="beauty_other", action="skipped_quiet")
             else:
                 await send_to_whatsapp_single(text, BEAUTY_WA_GROUP, media_bytes)
                 stats["beauty_sent_direct_wa"] += 1
+                _trace("EXTRAPE", route="beauty_other", action="wa_single", target=BEAUTY_WA_GROUP)
         return
 
     # ════════════════════════════════════════════════════════════
@@ -3193,9 +3311,11 @@ async def handle_extrape(event):
         if is_quiet_hours():
             log.info(f"[WA-SINGLE] 🌙 Quiet hours ({ist_now.strftime('%H:%M')}) — skipping CC")
             stats["ignored"] += 1
+            _trace("EXTRAPE", route="generic_cc", action="skipped_quiet")
         else:
             await send_to_whatsapp_single(text, CC_WA_GROUP, media_bytes)
             stats["cc_sent_via_extrape"] += 1
+            _trace("EXTRAPE", route="generic_cc", action="wa_single", target=CC_WA_GROUP)
         return
 
     if extract_flipkart_links(text):
@@ -3203,19 +3323,23 @@ async def handle_extrape(event):
         if is_quiet_hours():
             log.info(f"[WA-SINGLE] 🌙 Quiet hours ({ist_now.strftime('%H:%M')}) — skipping FK")
             stats["ignored"] += 1
+            _trace("EXTRAPE", route="generic_fk", action="skipped_quiet")
         else:
             await send_to_whatsapp_single(text, FK_WA_GROUP, media_bytes)
             stats["fk_sent_to_wa"] += 1
+            _trace("EXTRAPE", route="generic_fk", action="wa_single", target=FK_WA_GROUP)
         return
 
     if extract_amazon_links(text):
         log.info(f"[EXTRAPE] ✅ AMZ → Dealspouch | image={'yes' if media_bytes else 'no'}")
         await _send_to_dealspouch(text, media_bytes, "generic")
         stats["amz_sent_to_dealspouch"] += 1
+        _trace("EXTRAPE", route="generic_amz_to_dealspouch", action="dispatch", matched=matched_id)
         return
 
     log.info("[EXTRAPE] ⏭️ No recognisable link — ignored")
     stats["ignored"] += 1
+    _trace("EXTRAPE", route="no_link", action="ignored")
 
 # ══════════════════════════════════════════
 #  STEP 3 — Dealspouch reply → route by deal_type
@@ -3232,12 +3356,14 @@ async def handle_dealspouch(event):
     if not has_dealspouch_link(text):
         stats["ignored"] += 1
         log.info("[DEALSPOUCH] ⏭️ No dealspouch link — ignored")
+        _trace("DEALSPOUCH", route="no_dealspouch_link", action="ignored")
         return
 
     now = time.time()
     if now - last_dealspouch_handled < DEALSPOUCH_COOLDOWN:
         stats["ignored"] += 1
         log.info("[DEALSPOUCH] ⏭️ Cooldown — duplicate ignored")
+        _trace("DEALSPOUCH", route="cooldown", action="ignored")
         return
     last_dealspouch_handled = now
 
@@ -3271,6 +3397,7 @@ async def handle_dealspouch(event):
     if age_minutes > MAX_DEAL_AGE_MINUTES:
         log.info(f"[FRESHNESS] 🗑️ Stale ({age_minutes:.1f} min) → DROPPED")
         stats["stale_dropped"] += 1
+        _trace("DEALSPOUCH", route="stale", action="dropped", age_min=f"{age_minutes:.1f}")
         return
 
     ist_now = get_ist_now()
@@ -3284,10 +3411,12 @@ async def handle_dealspouch(event):
         if is_quiet_hours():
             log.info("[FASHION-DEALSPOUCH] 🌙 Quiet hours — skipping Fashion WA")
             stats["ignored"] += 1
+            _trace("DEALSPOUCH", route="fashion", action="skipped_quiet")
         else:
             log.info(f"[FASHION-DEALSPOUCH] 👗 → Fashion WA | image={'yes' if media_bytes else 'no'}")
             await send_to_whatsapp_single(text, FASHION_WA_GROUP, media_bytes)
             stats["fashion_sent_direct_wa"] += 1
+            _trace("DEALSPOUCH", route="fashion", action="wa_single", target=FASHION_WA_GROUP)
 
     elif deal_type == "beauty":
         log.info(
@@ -3296,10 +3425,12 @@ async def handle_dealspouch(event):
         if is_quiet_hours():
             log.info("[BEAUTY-DEALSPOUCH] 🌙 Quiet hours — skipping Beauty WA")
             stats["ignored"] += 1
+            _trace("DEALSPOUCH", route="beauty", action="skipped_quiet")
         else:
             log.info(f"[BEAUTY-DEALSPOUCH] 💄 → Beauty WA | image={'yes' if media_bytes else 'no'}")
             await send_to_whatsapp_single(text, BEAUTY_WA_GROUP, media_bytes)
             stats["beauty_sent_direct_wa"] += 1
+            _trace("DEALSPOUCH", route="beauty", action="wa_single", target=BEAUTY_WA_GROUP)
 
     # ── Step 2: Lucky deal swap (generic only) ───────────────────
     tg_text = text
@@ -3317,14 +3448,18 @@ async def handle_dealspouch(event):
             await client.send_message(MY_TG_GROUP, tg_text)
         stats["posted_to_tg"] += 1
         log.info(f"[TG] ✅ Posted to {MY_TG_GROUP}")
+        _trace("DEALSPOUCH", route=deal_type, action="tg_post", target=MY_TG_GROUP)
     except Exception as e:
         log.error(f"[TG] ❌ Failed: {e}")
+        _trace("DEALSPOUCH", route=deal_type, action="tg_error")
 
     # ── Step 4: Main WA bulk (all types, quiet hours respected) ──
     if is_quiet_hours():
         log.info(f"[WA-BULK] 🌙 Quiet hours ({ist_now.strftime('%H:%M')}) — skipping bulk")
+        _trace("DEALSPOUCH", route=deal_type, action="bulk_skipped_quiet")
     else:
         await send_to_whatsapp_bulk(tg_text, media_bytes)
+        _trace("DEALSPOUCH", route=deal_type, action="bulk_send")
 
 # ══════════════════════════════════════════
 #  MAIN
