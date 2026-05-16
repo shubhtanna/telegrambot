@@ -3198,15 +3198,18 @@ async def handle_extrape(event):
     if not matched_id:
         matched_id = _match_pending_by_links(text)
 
-    if matched_id and matched_id in pending_media:
-        media_bytes   = pending_media[matched_id]
-        entry         = sent_links_store.get(matched_id, {})
+    # CRITICAL FIX: Check sent_links_store (main deal store), not just pending_media (image cache)
+    # If no image exists, matched_id won't be in pending_media, so source_is_amazon stays False
+    if matched_id and matched_id in sent_links_store:
+        media_bytes   = pending_media.get(matched_id)  # May be None if no image
+        entry         = sent_links_store[matched_id]
         pending_is_cc = entry.get("is_cc", False)
         deal_type     = entry.get("deal_type", "generic")
         source_links  = entry.get("links") or set()
         source_text   = " ".join(sorted(source_links))
         source_is_amazon   = bool(extract_amazon_links(source_text))
         source_is_flipkart = bool(extract_flipkart_links_source(source_text))
+        _trace("EXTRAPE", action="matched_found", matched=matched_id, source_is_amazon=source_is_amazon, deal_type=deal_type)
         _cleanup_store(matched_id)
         log.info(
             f"[EXTRAPE] ✅ Matched id={matched_id} | "
