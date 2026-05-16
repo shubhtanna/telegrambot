@@ -2547,25 +2547,19 @@ CC_WA_GROUP      = "120363426468421381@g.us"
 FASHION_WA_GROUP = "120363427489881847@g.us"
 BEAUTY_WA_GROUP  = "120363425518003162@g.us"
 
-CC_DIRECT_GROUP = -1001481951196  # also doubles as Finnin TG group
+CC_DIRECT_GROUP = -1001481951196
 
-# Generic source groups (Amazon / FK / CC pipeline)
-GENERIC_SOURCE_GROUPS = [
+# Fashion/beauty are detected from the SAME source groups — no separate group needed
+SOURCE_GROUPS = [
     -1001493857075,
     -1001412868909,
     -1001389782464,
     CC_DIRECT_GROUP,
 ]
 
-# Dedicated fashion / beauty source groups — replace IDs before deploy
-FASHION_WA_GROUP = "120363427489881847@g.us"
-BEAUTY_WA_GROUP  = "120363425518003162@g.us"    
-
-SOURCE_GROUPS = GENERIC_SOURCE_GROUPS
-
 # ══════════════════════════════════════════
 #  FRESHNESS CHECK
-#  Unified Dealspouch queue: each entry = (media_bytes, deal_type, timestamp)
+#  Unified queue entry = (media_bytes, deal_type, timestamp)
 # ══════════════════════════════════════════
 MAX_DEAL_AGE_MINUTES = 10
 dealspouch_queue = collections.deque()
@@ -2613,12 +2607,9 @@ CC_FALSE_POSITIVE = re.compile(
 )
 
 def is_cc_deal(text: str) -> bool:
-    if not text:
-        return False
-    if CC_FALSE_POSITIVE.search(text):
-        return False
-    if CC_STRONG_KEYWORDS.search(text):
-        return True
+    if not text: return False
+    if CC_FALSE_POSITIVE.search(text): return False
+    if CC_STRONG_KEYWORDS.search(text): return True
     has_bank    = bool(BANK_NAMES.search(text))
     has_weak    = bool(CC_WEAK_KEYWORDS.search(text))
     has_cc_link = bool(CC_SHORT_LINK_PATTERNS.search(text))
@@ -2736,9 +2727,9 @@ def _is_lucky_deal() -> bool:
 # ══════════════════════════════════════════
 #  SHARED STATE
 # ══════════════════════════════════════════
-pending_media          = {}   # msg_id → image bytes
-sent_links_store       = {}   # msg_id → {links, is_cc, deal_type}
-sent_original_text     = {}   # msg_id → original text
+pending_media      = {}   # msg_id → image bytes
+sent_links_store   = {}   # msg_id → {links, is_cc, deal_type}
+sent_original_text = {}   # msg_id → original text
 
 client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
 
@@ -2851,14 +2842,16 @@ async def send_to_whatsapp_bulk(text, image_bytes=None):
                 async with session.post(f"{BAILEYS_URL}/send", data=form,
                                         timeout=aiohttp.ClientTimeout(total=30)) as r:
                     body = await r.text()
-                    if r.status != 200: log.error(f"[WA-BULK] ❌ HTTP {r.status} {body[:120]}"); return
+                    if r.status != 200:
+                        log.error(f"[WA-BULK] ❌ HTTP {r.status} {body[:120]}"); return
                     log.info(f"[WA-BULK] ✅ Queued! {body[:80]}")
             else:
                 async with session.post(f"{BAILEYS_URL}/send",
                                         json={"text": text, "secret": BAILEYS_SECRET},
                                         timeout=aiohttp.ClientTimeout(total=30)) as r:
                     body = await r.text()
-                    if r.status != 200: log.error(f"[WA-BULK] ❌ HTTP {r.status} {body[:120]}"); return
+                    if r.status != 200:
+                        log.error(f"[WA-BULK] ❌ HTTP {r.status} {body[:120]}"); return
                     log.info(f"[WA-BULK] ✅ Queued! {body[:80]}")
         stats["sent_to_wa_bulk"] += 1
     except Exception as e:
@@ -2878,14 +2871,16 @@ async def send_to_whatsapp_single(text, target_group, image_bytes=None):
                 async with session.post(f"{BAILEYS_URL}/send-single", data=form,
                                         timeout=aiohttp.ClientTimeout(total=30)) as r:
                     body = await r.text()
-                    if r.status != 200: log.error(f"[WA-SINGLE] ❌ HTTP {r.status} {body[:120]}"); return
+                    if r.status != 200:
+                        log.error(f"[WA-SINGLE] ❌ HTTP {r.status} {body[:120]}"); return
                     log.info(f"[WA-SINGLE] ✅ Sent to {target_group}! {body[:80]}")
             else:
                 async with session.post(f"{BAILEYS_URL}/send-single",
                                         json={"text": text, "secret": BAILEYS_SECRET, "target": target_group},
                                         timeout=aiohttp.ClientTimeout(total=30)) as r:
                     body = await r.text()
-                    if r.status != 200: log.error(f"[WA-SINGLE] ❌ HTTP {r.status} {body[:120]}"); return
+                    if r.status != 200:
+                        log.error(f"[WA-SINGLE] ❌ HTTP {r.status} {body[:120]}"); return
                     log.info(f"[WA-SINGLE] ✅ Sent to {target_group}! {body[:80]}")
     except Exception as e:
         log.error(f"[WA-SINGLE] ❌ Failed: {e}")
@@ -2894,7 +2889,6 @@ async def send_to_whatsapp_single(text, target_group, image_bytes=None):
 #  PUSH TO DEALSPOUCH QUEUE
 # ══════════════════════════════════════════
 async def _send_to_dealspouch(text, media_bytes, deal_type):
-    """Send to Dealspouch bot and record in unified queue."""
     _purge_stale_queue()
     await client.send_message(DEALSPOUCH_BOT, text)
     dealspouch_queue.append((media_bytes, deal_type, time.time()))
@@ -2907,6 +2901,15 @@ async def _send_to_dealspouch(text, media_bytes, deal_type):
 
 # ══════════════════════════════════════════
 #  STEP 1 — Source groups → detect & dispatch
+#
+#  Priority order inside each message:
+#  1. CC deal          → ExtraPe (deal_type=generic, is_cc=True)
+#  2. Fashion deal     → ExtraPe (deal_type=fashion)
+#  3. Beauty deal      → ExtraPe (deal_type=beauty)
+#  4. Amazon/FK        → ExtraPe (deal_type=generic)
+#
+#  CC_DIRECT_GROUP: fashion/beauty go direct to WA (no ExtraPe)
+#                   CC goes direct to CC WA (no ExtraPe)
 # ══════════════════════════════════════════
 @client.on(events.NewMessage(chats=SOURCE_GROUPS))
 async def handle_source(event):
@@ -2916,16 +2919,14 @@ async def handle_source(event):
     text    = event.message.text or event.message.caption or ""
     chat_id = event.chat_id
 
-    # ── FINNIN / CC_DIRECT GROUP ──────────────────────────────────
-    # Fashion and beauty deals go directly to their WA groups.
-    # CC deals go through the normal CC pipeline below.
+    # ── CC_DIRECT_GROUP (Finnin): direct sends, no ExtraPe ───────
     if chat_id == CC_DIRECT_GROUP:
         cc      = is_cc_deal(text)
         fashion = is_fashion_deal(text) and not cc
         beauty  = is_beauty_deal(text) and not cc
 
         if fashion:
-            log.info("[FINNIN] 👗 Fashion deal → Fashion WA direct")
+            log.info("[FINNIN] 👗 Fashion → Fashion WA direct")
             media_bytes = await download_media_bytes(event.message)
             if is_quiet_hours():
                 log.info("[FINNIN] 🌙 Quiet hours — skipping"); stats["ignored"] += 1
@@ -2936,7 +2937,7 @@ async def handle_source(event):
             return
 
         if beauty:
-            log.info("[FINNIN] 💄 Beauty deal → Beauty WA direct")
+            log.info("[FINNIN] 💄 Beauty → Beauty WA direct")
             media_bytes = await download_media_bytes(event.message)
             if is_quiet_hours():
                 log.info("[FINNIN] 🌙 Quiet hours — skipping"); stats["ignored"] += 1
@@ -2959,42 +2960,14 @@ async def handle_source(event):
             return
         return
 
-    # ── FASHION DEDICATED SOURCE GROUP ───────────────────────────
-    if chat_id == GENERIC_SOURCE_GROUPS:
-        if not is_fashion_deal(text):
-            return
-        log.info("[FASHION-SOURCE] 👗 Fashion deal → ExtraPe")
-        media_bytes    = await download_media_bytes(event.message)
-        original_links = extract_all_links(text)
-        clean_text     = sanitize_text_for_bot(text)
-        sent = await client.send_message(EXTRAPE_BOT, clean_text)
-        _store_deal(sent.id, media_bytes, original_links,
-                    is_cc=False, text=clean_text, deal_type="fashion")
-        stats["fashion_sent_to_extrape"] += 1
-        log.info(f"[FASHION-SOURCE] 📤 Sent to ExtraPe (msg_id={sent.id})")
-        return
-
-    # ── BEAUTY DEDICATED SOURCE GROUP ────────────────────────────
-    if chat_id == GENERIC_SOURCE_GROUPS:
-        if not is_beauty_deal(text):
-            return
-        log.info("[BEAUTY-SOURCE] 💄 Beauty deal → ExtraPe")
-        media_bytes    = await download_media_bytes(event.message)
-        original_links = extract_all_links(text)
-        clean_text     = sanitize_text_for_bot(text)
-        sent = await client.send_message(EXTRAPE_BOT, clean_text)
-        _store_deal(sent.id, media_bytes, original_links,
-                    is_cc=False, text=clean_text, deal_type="beauty")
-        stats["beauty_sent_to_extrape"] += 1
-        log.info(f"[BEAUTY-SOURCE] 📤 Sent to ExtraPe (msg_id={sent.id})")
-        return
-
-    # ── GENERIC SOURCE GROUPS (Amazon / FK / CC) ─────────────────
+    # ── ALL OTHER SOURCE GROUPS ───────────────────────────────────
     amz_links = extract_amazon_links(text)
     fk_links  = extract_flipkart_links_source(text)
     cc_deal   = is_cc_deal(text)
+    fashion   = is_fashion_deal(text) and not cc_deal
+    beauty    = is_beauty_deal(text) and not cc_deal
 
-    if not amz_links and not fk_links and not cc_deal:
+    if not amz_links and not fk_links and not cc_deal and not fashion and not beauty:
         return
 
     stats["deals_found"] += 1
@@ -3013,14 +2986,37 @@ async def handle_source(event):
     original_links = extract_all_links(text)
     clean_text     = sanitize_text_for_bot(text)
 
+    # Priority 1: CC
     if cc_deal:
         log.info(f"[CC-EXTRAPE] 💳 CC Deal #{stats['deals_found']} → ExtraPe")
         sent = await client.send_message(EXTRAPE_BOT, clean_text)
         _store_deal(sent.id, media_bytes, original_links,
                     is_cc=True, text=clean_text, deal_type="generic")
         stats["sent_to_extrape"] += 1
+        log.info(f"[CC-EXTRAPE] 📤 Sent to ExtraPe (msg_id={sent.id})")
         return
 
+    # Priority 2: Fashion
+    if fashion:
+        log.info(f"[FASHION-SOURCE] 👗 Fashion Deal #{stats['deals_found']} → ExtraPe")
+        sent = await client.send_message(EXTRAPE_BOT, clean_text)
+        _store_deal(sent.id, media_bytes, original_links,
+                    is_cc=False, text=clean_text, deal_type="fashion")
+        stats["fashion_sent_to_extrape"] += 1
+        log.info(f"[FASHION-SOURCE] 📤 Sent to ExtraPe (msg_id={sent.id})")
+        return
+
+    # Priority 3: Beauty
+    if beauty:
+        log.info(f"[BEAUTY-SOURCE] 💄 Beauty Deal #{stats['deals_found']} → ExtraPe")
+        sent = await client.send_message(EXTRAPE_BOT, clean_text)
+        _store_deal(sent.id, media_bytes, original_links,
+                    is_cc=False, text=clean_text, deal_type="beauty")
+        stats["beauty_sent_to_extrape"] += 1
+        log.info(f"[BEAUTY-SOURCE] 📤 Sent to ExtraPe (msg_id={sent.id})")
+        return
+
+    # Priority 4: Generic Amazon / Flipkart
     link_type = "Amazon" if amz_links else "Flipkart"
     log.info(f"[SOURCE] 🎯 {link_type} Deal #{stats['deals_found']} found!")
     sent = await client.send_message(EXTRAPE_BOT, clean_text)
@@ -3032,11 +3028,22 @@ async def handle_source(event):
 # ══════════════════════════════════════════
 #  STEP 2 — ExtraPe reply → route by deal_type
 #
-#  FASHION / BEAUTY flows:
-#  ┌─ Amazon link  → Dealspouch → (Step 3 handles WA + TG + bulk)
-#  ├─ Flipkart link → Fashion/Beauty WA  +  FK WA group
-#  └─ Other link   → Fashion/Beauty WA only
-#     ExtraPe fail → EarnKaro (all deal types)
+#  FASHION:
+#    Amazon  → Dealspouch queue → Step 3 → Fashion WA + TG + bulk
+#    Flipkart → Fashion WA + FK WA group
+#    Other   → Fashion WA only
+#    Fail    → EarnKaro
+#
+#  BEAUTY:
+#    Amazon  → Dealspouch queue → Step 3 → Beauty WA + TG + bulk
+#    Flipkart → Beauty WA + FK WA group
+#    Other   → Beauty WA only
+#    Fail    → EarnKaro
+#
+#  GENERIC:
+#    CC      → CC WA
+#    FK      → FK WA
+#    Amazon  → Dealspouch queue → Step 3 → TG + bulk
 # ══════════════════════════════════════════
 @client.on(events.NewMessage(chats=EXTRAPE_BOT))
 async def handle_extrape(event):
@@ -3049,7 +3056,7 @@ async def handle_extrape(event):
         replied_to_id = event.message.reply_to.reply_to_msg_id
         log.info(f"[EXTRAPE] 🔗 Reply to msg_id={replied_to_id}")
 
-    # ── ExtraPe failure → EarnKaro (all types) ───────────────────
+    # ── ExtraPe failure → EarnKaro (all deal types) ──────────────
     if is_extrape_failure(text):
         log.info("[EXTRAPE] ❌ Conversion failed → EarnKaro")
         original_text = None
@@ -3103,7 +3110,6 @@ async def handle_extrape(event):
     else:
         log.warning("[EXTRAPE] ⚠️ No reply_to match — using ExtraPe's own image if any")
 
-    # Fallback to ExtraPe's own attached image
     if not media_bytes:
         media_bytes = await download_media_bytes(event.message)
         log.info(f"[EXTRAPE] 🖼️ Fallback image: {'yes' if media_bytes else 'no'}")
@@ -3117,75 +3123,68 @@ async def handle_extrape(event):
 
     # ════════════════════════════════════════════════════════════
     #  FASHION PIPELINE
-    #  Amazon  → Dealspouch queue → Step 3 → Fashion WA + TG + bulk
-    #  Flipkart → Fashion WA + FK WA group
-    #  Other   → Fashion WA only
     # ════════════════════════════════════════════════════════════
     if deal_type == "fashion":
-        wa_group = FASHION_WA_GROUP
-        label    = "👗 FASHION"
-
         if extract_amazon_links(text):
-            log.info(f"[{label}] AMZ → Dealspouch queue")
+            # Amazon fashion → Dealspouch → Step 3 sends Fashion WA + TG + bulk
+            log.info(f"[FASHION] ✅ AMZ → Dealspouch | image={'yes' if media_bytes else 'no'}")
             await _send_to_dealspouch(text, media_bytes, "fashion")
             stats["fashion_sent_to_extrape"] += 1
 
         elif extract_flipkart_links(text):
-            log.info(f"[{label}] FK → Fashion WA + FK WA | image={'yes' if media_bytes else 'no'}")
+            # Flipkart fashion → Fashion WA + FK WA group
+            log.info(f"[FASHION] 🛒 FK → Fashion WA + FK WA | image={'yes' if media_bytes else 'no'}")
             if is_quiet_hours():
-                log.info(f"[{label}] 🌙 Quiet hours — skipping"); stats["ignored"] += 1
+                log.info("[FASHION] 🌙 Quiet hours — skipping"); stats["ignored"] += 1
             else:
-                await send_to_whatsapp_single(text, wa_group, media_bytes)       # Fashion WA
-                await send_to_whatsapp_single(text, FK_WA_GROUP, media_bytes)    # FK WA group
+                await send_to_whatsapp_single(text, FASHION_WA_GROUP, media_bytes)
+                await send_to_whatsapp_single(text, FK_WA_GROUP, media_bytes)
                 stats["fashion_sent_direct_wa"] += 1
                 stats["fk_sent_to_wa"] += 1
 
         else:
-            # Other platforms (Myntra, Ajio, etc.) — ExtraPe may or may not convert
-            log.info(f"[{label}] Other → Fashion WA | image={'yes' if media_bytes else 'no'}")
+            # Other platforms (Myntra, Ajio, etc.) → Fashion WA only
+            log.info(f"[FASHION] 🌐 Other → Fashion WA only | image={'yes' if media_bytes else 'no'}")
             if is_quiet_hours():
-                log.info(f"[{label}] 🌙 Quiet hours — skipping"); stats["ignored"] += 1
+                log.info("[FASHION] 🌙 Quiet hours — skipping"); stats["ignored"] += 1
             else:
-                await send_to_whatsapp_single(text, wa_group, media_bytes)
+                await send_to_whatsapp_single(text, FASHION_WA_GROUP, media_bytes)
                 stats["fashion_sent_direct_wa"] += 1
         return
 
     # ════════════════════════════════════════════════════════════
     #  BEAUTY PIPELINE
-    #  Amazon  → Dealspouch queue → Step 3 → Beauty WA + TG + bulk
-    #  Flipkart → Beauty WA + FK WA group
-    #  Other   → Beauty WA only
     # ════════════════════════════════════════════════════════════
     if deal_type == "beauty":
-        wa_group = BEAUTY_WA_GROUP
-        label    = "💄 BEAUTY"
-
         if extract_amazon_links(text):
-            log.info(f"[{label}] AMZ → Dealspouch queue")
+            # Amazon beauty → Dealspouch → Step 3 sends Beauty WA + TG + bulk
+            log.info(f"[BEAUTY] ✅ AMZ → Dealspouch | image={'yes' if media_bytes else 'no'}")
             await _send_to_dealspouch(text, media_bytes, "beauty")
             stats["beauty_sent_to_extrape"] += 1
 
         elif extract_flipkart_links(text):
-            log.info(f"[{label}] FK → Beauty WA + FK WA | image={'yes' if media_bytes else 'no'}")
+            # Flipkart beauty → Beauty WA + FK WA group
+            log.info(f"[BEAUTY] 🛒 FK → Beauty WA + FK WA | image={'yes' if media_bytes else 'no'}")
             if is_quiet_hours():
-                log.info(f"[{label}] 🌙 Quiet hours — skipping"); stats["ignored"] += 1
+                log.info("[BEAUTY] 🌙 Quiet hours — skipping"); stats["ignored"] += 1
             else:
-                await send_to_whatsapp_single(text, wa_group, media_bytes)       # Beauty WA
-                await send_to_whatsapp_single(text, FK_WA_GROUP, media_bytes)    # FK WA group
+                await send_to_whatsapp_single(text, BEAUTY_WA_GROUP, media_bytes)
+                await send_to_whatsapp_single(text, FK_WA_GROUP, media_bytes)
                 stats["beauty_sent_direct_wa"] += 1
                 stats["fk_sent_to_wa"] += 1
 
         else:
-            log.info(f"[{label}] Other → Beauty WA | image={'yes' if media_bytes else 'no'}")
+            # Other platforms (Nykaa, Purplle, etc.) → Beauty WA only
+            log.info(f"[BEAUTY] 🌐 Other → Beauty WA only | image={'yes' if media_bytes else 'no'}")
             if is_quiet_hours():
-                log.info(f"[{label}] 🌙 Quiet hours — skipping"); stats["ignored"] += 1
+                log.info("[BEAUTY] 🌙 Quiet hours — skipping"); stats["ignored"] += 1
             else:
-                await send_to_whatsapp_single(text, wa_group, media_bytes)
+                await send_to_whatsapp_single(text, BEAUTY_WA_GROUP, media_bytes)
                 stats["beauty_sent_direct_wa"] += 1
         return
 
     # ════════════════════════════════════════════════════════════
-    #  GENERIC PIPELINE (unchanged)
+    #  GENERIC PIPELINE (unchanged original behaviour)
     # ════════════════════════════════════════════════════════════
     if pending_is_cc or is_cc_deal(text):
         log.info(f"[EXTRAPE] 💳 CC → CC WA | image={'yes' if media_bytes else 'no'}")
@@ -3219,9 +3218,9 @@ async def handle_extrape(event):
 # ══════════════════════════════════════════
 #  STEP 3 — Dealspouch reply → route by deal_type
 #
-#  fashion → Fashion WA  + TG  + main WA bulk
-#  beauty  → Beauty WA   + TG  + main WA bulk
-#  generic → TG + main WA bulk  (original behaviour)
+#  fashion → Fashion WA  then  TG + main WA bulk
+#  beauty  → Beauty WA   then  TG + main WA bulk
+#  generic → TG + main WA bulk only (original behaviour)
 # ══════════════════════════════════════════
 @client.on(events.NewMessage(chats=DEALSPOUCH_BOT))
 async def handle_dealspouch(event):
@@ -3240,7 +3239,7 @@ async def handle_dealspouch(event):
         return
     last_dealspouch_handled = now
 
-    # Pop oldest entry
+    # Pop oldest entry from unified queue
     if not dealspouch_queue:
         log.warning("[DEALSPOUCH] ⚠️ Queue empty — text-only generic fallback")
         media_bytes = None
@@ -3264,28 +3263,26 @@ async def handle_dealspouch(event):
     ist_now = get_ist_now()
     log.info(f"[DEALSPOUCH] ✅ Fresh | IST: {ist_now.strftime('%H:%M')} | deal_type={deal_type}")
 
-    # ── Pick the specialty WA group (fashion / beauty) ──────────
-    specialty_wa = None
+    # ── Step 1: Send to specialty WA first (fashion / beauty) ────
     if deal_type == "fashion":
-        specialty_wa = FASHION_WA_GROUP
-        log.info(f"[FASHION-DEALSPOUCH] 👗 Will send to Fashion WA + TG + bulk")
-    elif deal_type == "beauty":
-        specialty_wa = BEAUTY_WA_GROUP
-        log.info(f"[BEAUTY-DEALSPOUCH] 💄 Will send to Beauty WA + TG + bulk")
-
-    # ── Specialty WA first (fashion / beauty) ───────────────────
-    if specialty_wa:
         if is_quiet_hours():
-            log.info(f"[DEALSPOUCH] 🌙 Quiet hours — skipping specialty WA send")
+            log.info("[FASHION-DEALSPOUCH] 🌙 Quiet hours — skipping Fashion WA")
             stats["ignored"] += 1
         else:
-            await send_to_whatsapp_single(text, specialty_wa, media_bytes)
-            if deal_type == "fashion":
-                stats["fashion_sent_direct_wa"] += 1
-            else:
-                stats["beauty_sent_direct_wa"] += 1
+            log.info(f"[FASHION-DEALSPOUCH] 👗 → Fashion WA | image={'yes' if media_bytes else 'no'}")
+            await send_to_whatsapp_single(text, FASHION_WA_GROUP, media_bytes)
+            stats["fashion_sent_direct_wa"] += 1
 
-    # ── Lucky deal link swap (generic only — keeps specialty WA clean) ──
+    elif deal_type == "beauty":
+        if is_quiet_hours():
+            log.info("[BEAUTY-DEALSPOUCH] 🌙 Quiet hours — skipping Beauty WA")
+            stats["ignored"] += 1
+        else:
+            log.info(f"[BEAUTY-DEALSPOUCH] 💄 → Beauty WA | image={'yes' if media_bytes else 'no'}")
+            await send_to_whatsapp_single(text, BEAUTY_WA_GROUP, media_bytes)
+            stats["beauty_sent_direct_wa"] += 1
+
+    # ── Step 2: Lucky deal swap (generic only) ───────────────────
     tg_text = text
     if deal_type == "generic" and _is_lucky_deal():
         tg_text = re.sub(r'https?://amaz\.dealspouch\.com/\S+', WA_INVITE_LINK, tg_text)
@@ -3293,7 +3290,7 @@ async def handle_dealspouch(event):
 
     tg_text = tg_text + TG_BOT_FOOTER
 
-    # ── Post to Telegram (all types) ────────────────────────────
+    # ── Step 3: Post to TG (all types) ───────────────────────────
     try:
         if media_bytes:
             await client.send_file(MY_TG_GROUP, media_bytes, caption=tg_text)
@@ -3304,7 +3301,7 @@ async def handle_dealspouch(event):
     except Exception as e:
         log.error(f"[TG] ❌ Failed: {e}")
 
-    # ── Main WA bulk (all types, respects quiet hours) ──────────
+    # ── Step 4: Main WA bulk (all types, quiet hours respected) ──
     if is_quiet_hours():
         log.info(f"[WA-BULK] 🌙 Quiet hours ({ist_now.strftime('%H:%M')}) — skipping bulk")
     else:
@@ -3321,8 +3318,6 @@ async def run():
             log.info(f"✅ Logged in as: {me.first_name} (@{me.username})")
             log.info(f"👂 Watching {len(SOURCE_GROUPS)} source group(s)")
             log.info(f"💳 CC / Finnin Group  : {CC_DIRECT_GROUP}")
-            # log.info(f"👗 Fashion Source     : {FASHION_SOURCE_GROUP}")
-            # log.info(f"💄 Beauty Source      : {BEAUTY_SOURCE_GROUP}")
             log.info(f"🤖 ExtraPe Bot        : {EXTRAPE_BOT}")
             log.info(f"🤖 EarnKaro Bot       : {EARNKARO_BOT}")
             log.info(f"🤖 Dealspouch Bot     : {DEALSPOUCH_BOT}")
@@ -3335,11 +3330,11 @@ async def run():
             log.info(f"⏱️  Freshness limit    : {MAX_DEAL_AGE_MINUTES} min")
             log.info(f"🎯 Lucky deals / day  : {LUCKY_DEALS_PER_DAY}")
             log.info("─" * 55)
-            log.info("FASHION / BEAUTY FLOWS:")
-            log.info("  Amazon  → ExtraPe → Dealspouch → WA + TG + bulk")
-            log.info("  Flipkart → ExtraPe → Fashion/Beauty WA + FK WA")
-            log.info("  Other   → ExtraPe → Fashion/Beauty WA only")
-            log.info("  Fail    → EarnKaro")
+            log.info("FASHION / BEAUTY FLOWS (detected from all source groups):")
+            log.info("  Amazon   → ExtraPe → Dealspouch → Fashion/Beauty WA + TG + bulk")
+            log.info("  Flipkart → ExtraPe → Fashion/Beauty WA + FK WA group")
+            log.info("  Other    → ExtraPe → Fashion/Beauty WA only")
+            log.info("  Fail     → EarnKaro")
             log.info("─" * 55)
             log.info("⏳ Waiting for deals...\n")
             await client.run_until_disconnected()
