@@ -2629,7 +2629,7 @@ FASHION_KEYWORDS = re.compile(
     r'top|tops|skirt|skirts|leggings?|innerwear|underwear|lingerie|nightwear|'
     r'night ?suit|swimwear|swim ?suit|athleisure|co-?ord(?: set)?|western wear|'
     r'indo-?western|men(?:\'s)? fashion|women(?:\'s)? fashion|kids? fashion|'
-    r'apparel|garment|clothing|myntra|ajio|bewakoof|tata cliq fashion)\b',
+    r'apparel|garment|clothing)\b',
     re.IGNORECASE
 )
 
@@ -3125,6 +3125,7 @@ async def handle_extrape(event):
     #  FASHION PIPELINE
     # ════════════════════════════════════════════════════════════
     if deal_type == "fashion":
+        log.info(f"[FASHION] 🛒 FK → Fashion WA(SHubhunhunh) + FK WA | image={'yes' if media_bytes else 'no'}")
         if extract_amazon_links(text):
             # Amazon fashion → Dealspouch → Step 3 sends Fashion WA + TG + bulk
             log.info(f"[FASHION] ✅ AMZ → Dealspouch | image={'yes' if media_bytes else 'no'}")
@@ -3156,6 +3157,7 @@ async def handle_extrape(event):
     #  BEAUTY PIPELINE
     # ════════════════════════════════════════════════════════════
     if deal_type == "beauty":
+        log.info(f"[FASHION] 🛒 FK → Fashion WA(beautyyyyy) + FK WA | image={'yes' if media_bytes else 'no'}")
         if extract_amazon_links(text):
             # Amazon beauty → Dealspouch → Step 3 sends Beauty WA + TG + bulk
             log.info(f"[BEAUTY] ✅ AMZ → Dealspouch | image={'yes' if media_bytes else 'no'}")
@@ -3247,6 +3249,17 @@ async def handle_dealspouch(event):
         age_minutes = 0.0
     else:
         media_bytes, deal_type, ts = dealspouch_queue.popleft()
+        log.info(
+            f"[DEBUG] deal_type={deal_type}"
+        )
+
+        log.info(
+            f"[DEBUG] Fashion group={FASHION_WA_GROUP}"
+        )
+
+        log.info(
+            f"[DEBUG] Beauty group={BEAUTY_WA_GROUP}"
+        )
         age_minutes = (time.time() - ts) / 60
         log.info(
             f"[DEALSPOUCH] ✅ Popped | deal_type={deal_type} | "
@@ -3265,6 +3278,9 @@ async def handle_dealspouch(event):
 
     # ── Step 1: Send to specialty WA first (fashion / beauty) ────
     if deal_type == "fashion":
+        log.info(
+            "[DEBUG] Entered fashion block"
+        )
         if is_quiet_hours():
             log.info("[FASHION-DEALSPOUCH] 🌙 Quiet hours — skipping Fashion WA")
             stats["ignored"] += 1
@@ -3274,6 +3290,9 @@ async def handle_dealspouch(event):
             stats["fashion_sent_direct_wa"] += 1
 
     elif deal_type == "beauty":
+        log.info(
+            "[DEBUG] Entered beauty block"
+        )
         if is_quiet_hours():
             log.info("[BEAUTY-DEALSPOUCH] 🌙 Quiet hours — skipping Beauty WA")
             stats["ignored"] += 1
