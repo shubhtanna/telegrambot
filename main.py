@@ -2710,6 +2710,7 @@ stats = {
 # ══════════════════════════════════════════
 #  DAILY LUCKY DEAL COUNTER
 # ══════════════════════════════════════════
+LUCKY_DEALS_PER_DAY = 13
 _daily_counter_date = None
 _daily_deal_count   = 0
 _lucky_deal_slots   = set()
@@ -2726,7 +2727,7 @@ WA_INVITE_LINK      = "https://tinyurl.com/fhknr97k"
 TG_BOT_FOOTER       = "\n\nTelegram Bot - t.me/Dealspouch_Product_bot"
 
 def _refresh_daily_counter():
-    global _daily_counter_date, _daily_deal_count, _lucky_deal_slots
+    global _daily_counter_date, _daily_deal_count, _lucky_deal_slots, _lucky_link_pool, _lucky_link_index
     today = get_ist_now().date()
     if _daily_counter_date != today:
         _daily_counter_date = today
@@ -2748,7 +2749,12 @@ def _is_lucky_deal() -> bool:
 
 def _get_lucky_link() -> str:
     """Get next random lucky link (each link appears 6 times but in random order)."""
-    global _lucky_link_index
+    global _lucky_link_index, _lucky_link_pool
+    _refresh_daily_counter()
+    if not _lucky_link_pool or _lucky_link_index >= len(_lucky_link_pool):
+        _lucky_link_pool = LUCKY_DEAL_LINKS * 6
+        random.shuffle(_lucky_link_pool)
+        _lucky_link_index = 0
     link = _lucky_link_pool[_lucky_link_index]
     _lucky_link_index += 1
     return link
