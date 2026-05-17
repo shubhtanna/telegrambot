@@ -2710,7 +2710,7 @@ stats = {
 # ══════════════════════════════════════════
 #  DAILY LUCKY DEAL COUNTER
 # ══════════════════════════════════════════
-LUCKY_DEALS_PER_DAY = 13
+LUCKY_DEALS_PER_DAY = 18
 _daily_counter_date = None
 _daily_deal_count   = 0
 _lucky_deal_slots   = set()
