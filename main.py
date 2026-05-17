@@ -2672,7 +2672,7 @@ def get_ist_now():
 def is_quiet_hours():
     now = get_ist_now()
     m = now.hour * 60 + now.minute
-    return (1 * 60) <= m < (8 * 60)
+    return (0 * 60 + 30) <= m < (8 * 60)
 
 # ══════════════════════════════════════════
 #  HEALTH CHECK
@@ -2707,9 +2707,16 @@ _daily_counter_date = None
 _daily_deal_count   = 0
 _lucky_deal_slots   = set()
 
+# ── Lucky links: 3 different links, each appears 6 times (6+6+6=18 per day) ──
+LUCKY_DEAL_LINKS    = [
+    "https://tinyurl.com/dwn7pcy6",      # Link 1: deals 1-6
+    "https://tinyurl.com/2j5hrt8n",      # Link 2: deals 7-12
+    "https://tinyurl.com/3f5wun5n"       # Link 3: deals 13-18
+]
+_lucky_link_pool    = []               # Pool of randomized links (6 of each)
+_lucky_link_index   = 0                # Current position in pool
 WA_INVITE_LINK      = "https://tinyurl.com/fhknr97k"
 TG_BOT_FOOTER       = "\n\nTelegram Bot - t.me/Dealspouch_Product_bot"
-LUCKY_DEALS_PER_DAY = 13
 
 def _refresh_daily_counter():
     global _daily_counter_date, _daily_deal_count, _lucky_deal_slots
@@ -2718,7 +2725,11 @@ def _refresh_daily_counter():
         _daily_counter_date = today
         _daily_deal_count   = 0
         _lucky_deal_slots   = set(random.sample(range(1, 61), LUCKY_DEALS_PER_DAY))
-        log.info(f"[DAILY] 🗓️ New day {today} — lucky slots: {sorted(_lucky_deal_slots)}")
+        # ── Randomize link pool: each link 6 times, shuffled ──
+        _lucky_link_pool = LUCKY_DEAL_LINKS * 6
+        random.shuffle(_lucky_link_pool)
+        _lucky_link_index = 0
+        log.info(f"[DAILY] 🗓️ New day {today} — lucky slots: {sorted(_lucky_deal_slots)} | link pool randomized")
 
 def _is_lucky_deal() -> bool:
     global _daily_deal_count
@@ -2727,6 +2738,13 @@ def _is_lucky_deal() -> bool:
     lucky = _daily_deal_count in _lucky_deal_slots
     log.info(f"[DAILY] Deal #{_daily_deal_count} today | lucky={lucky}")
     return lucky
+
+def _get_lucky_link() -> str:
+    """Get next random lucky link (each link appears 6 times but in random order)."""
+    global _lucky_link_index
+    link = _lucky_link_pool[_lucky_link_index]
+    _lucky_link_index += 1
+    return link
 
 # ══════════════════════════════════════════
 #  SHARED STATE
@@ -3454,8 +3472,9 @@ async def handle_dealspouch(event):
     # ── Step 2: Lucky deal swap (generic only) ───────────────────
     tg_text = text
     if deal_type == "generic" and _is_lucky_deal():
-        tg_text = re.sub(r'https?://amaz\.dealspouch\.com/\S+', WA_INVITE_LINK, tg_text)
-        log.info("[DAILY] 🎯 Lucky deal — replaced dealspouch link with WA invite")
+        lucky_link = _get_lucky_link()
+        tg_text = re.sub(r'https?://amaz\.dealspouch\.com/\S+', lucky_link, tg_text, count=1)
+        log.info(f"[DAILY] 🎯 Lucky deal #{_daily_deal_count} — replaced dealspouch link with {lucky_link}")
 
     tg_text = tg_text + TG_BOT_FOOTER
 
