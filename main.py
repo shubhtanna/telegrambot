@@ -2632,13 +2632,13 @@ FASHION_KEYWORDS = re.compile(
     r'purse|clutch|tote bag|backpack|wallet|belt|belts|watch|watches|sunglasses|'
     r'top|tops|skirt|skirts|leggings?|innerwear|underwear|lingerie|nightwear|'
     r'night ?suit|swimwear|swim ?suit|athleisure|co-?ord(?: set)?|western wear|'
-    r'indo-?western|men(?:\'s)? fashion|women(?:\'s)? fashion|kids? fashion|'
+    r"indo-?western|men(?:['’]?s)? fashion|women(?:['’]?s)? fashion|womens?|mens?|kids? fashion|"
     r'apparel|garment|clothing)\b',
     re.IGNORECASE
 )
 
 def is_fashion_deal(text: str) -> bool:
-    return bool(text) and bool(FASHION_KEYWORDS.search(text))
+    return bool(text) and bool(FASHION_KEYWORDS.search(_normalize_category_text(text)))
 
 # ══════════════════════════════════════════
 #  BEAUTY DEAL DETECTION
@@ -2661,7 +2661,14 @@ BEAUTY_KEYWORDS = re.compile(
 )
 
 def is_beauty_deal(text: str) -> bool:
-    return bool(text) and bool(BEAUTY_KEYWORDS.search(text))
+    return bool(text) and bool(BEAUTY_KEYWORDS.search(_normalize_category_text(text)))
+
+def classify_special_deal(text: str) -> str:
+    if is_fashion_deal(text):
+        return "fashion"
+    if is_beauty_deal(text):
+        return "beauty"
+    return "generic"
 
 # ══════════════════════════════════════════
 #  IST HELPERS
@@ -2811,6 +2818,14 @@ def is_extrape_failure(text):
 
 def _normalize_text(text: str) -> str:
     return re.sub(r'\s+', ' ', (text or '').strip().lower())
+
+def _normalize_category_text(text: str) -> str:
+    if not text:
+        return ""
+    normalized = text.lower()
+    normalized = normalized.replace("’", "'").replace("‘", "'")
+    normalized = normalized.replace("–", "-").replace("—", "-")
+    return re.sub(r'\s+', ' ', normalized).strip()
 
 def _trace(stage: str, **fields):
     compact = " | ".join(f"{k}={v}" for k, v in fields.items())
@@ -3254,14 +3269,12 @@ async def handle_extrape(event):
             extrape_processed_reply_ids.pop()
 
     if deal_type == "generic" and not pending_is_cc:
-        looks_fashion = is_fashion_deal(text)
-        looks_beauty = is_beauty_deal(text)
-        if looks_fashion and not looks_beauty:
-            deal_type = "fashion"
-            log.warning("[EXTRAPE] 🧩 Fallback inferred deal_type=fashion from converted text")
-        elif looks_beauty and not looks_fashion:
-            deal_type = "beauty"
-            log.warning("[EXTRAPE] 🧩 Fallback inferred deal_type=beauty from converted text")
+        inferred_deal_type = classify_special_deal(text)
+        if inferred_deal_type != "generic":
+            deal_type = inferred_deal_type
+            log.warning(f"[EXTRAPE] 🧩 Fallback inferred deal_type={deal_type} from converted text")
+        elif source_is_flipkart:
+            log.info("[EXTRAPE] 🛒 Flipkart link — keeping deal_type=generic (will route by link type)")
 
     # ════════════════════════════════════════════════════════════
     #  FASHION PIPELINE
