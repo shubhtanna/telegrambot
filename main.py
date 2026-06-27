@@ -2717,8 +2717,8 @@ _lucky_deal_slots   = set()
 
 # ── Lucky links: 3 different links, each appears 6 times (6+6+6=18 per day) ──
 LUCKY_DEAL_LINKS    = [
-    "https://tinyurl.com/dwn7pcy6",      # Link 1: deals 1-6
-    "https://tinyurl.com/2j5hrt8n",      # Link 2: deals 7-12
+    "https://tinyurl.com/z95n7px4",      # Link 1: deals 1-6
+    "https://tinyurl.com/yu75d4sc",      # Link 2: deals 7-12
     "https://tinyurl.com/3f5wun5n"       # Link 3: deals 13-18
 ]
 _lucky_link_pool    = []               # Pool of randomized links (6 of each)
