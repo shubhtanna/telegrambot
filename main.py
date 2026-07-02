@@ -2523,7 +2523,7 @@ from telethon.sessions import StringSession
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
-import asyncio, re, io, logging, time, aiohttp, os, threading, pytz, collections, random
+import asyncio, re, io, logging, time, aiohttp, os, threading, pytz, collections, random, json
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -2676,10 +2676,27 @@ def classify_special_deal(text: str) -> str:
 def get_ist_now():
     return datetime.now(pytz.timezone("Asia/Kolkata"))
 
+_quiet_open_date   = None
+_quiet_open_minute = 7 * 60   # fallback default: 7:00 AM
+
+def _get_daily_open_minute():
+    """Pick a random wake-up time between 7:00–8:00 AM IST, once per day."""
+    global _quiet_open_date, _quiet_open_minute
+    today = get_ist_now().date()
+    if _quiet_open_date != today:
+        _quiet_open_date   = today
+        _quiet_open_minute = random.randint(7 * 60, 8 * 60)
+        log.info(
+            f"[QUIET] 🌅 Today's wake-up time: "
+            f"{_quiet_open_minute // 60:02d}:{_quiet_open_minute % 60:02d} IST"
+        )
+    return _quiet_open_minute
+
 def is_quiet_hours():
     now = get_ist_now()
     m = now.hour * 60 + now.minute
-    return (0 * 60 + 30) <= m < (8 * 60)
+    open_minute = _get_daily_open_minute()
+    return (1 * 60) <= m < open_minute   # closes 1:00 AM, opens 7:00–8:00 AM (random daily)
 
 # ══════════════════════════════════════════
 #  HEALTH CHECK
@@ -2938,6 +2955,76 @@ async def download_media_bytes(message):
             return buf.getvalue()
     except Exception as e:
         log.warning(f"Media download failed: {e}")
+    return None
+
+# ══════════════════════════════════════════
+#  PRODUCT IMAGE FETCH (fallback when no image was captured)
+# ══════════════════════════════════════════
+_IMG_FETCH_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-IN,en;q=0.9",
+}
+
+async def fetch_product_image_bytes(link: str) -> bytes | None:
+    """
+    Follow a (possibly shortened) product link to its landing page and scrape
+    the main product image, then download it as bytes. Used as a fallback when
+    the source post itself had no photo attached.
+    """
+    if not link:
+        return None
+    try:
+        async with aiohttp.ClientSession(headers=_IMG_FETCH_HEADERS) as session:
+            async with session.get(
+                link, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=12)
+            ) as resp:
+                if resp.status != 200:
+                    log.warning(f"[IMG-FETCH] ⚠️ Landing page HTTP {resp.status} for {link}")
+                    return None
+                html = await resp.text(errors="ignore")
+
+            img_url = None
+
+            # 1) Amazon: data-a-dynamic-image carries a JSON map of {url: [w,h]} — pick highest-res
+            m = re.search(r'data-a-dynamic-image="([^"]+)"', html)
+            if m:
+                try:
+                    raw = m.group(1).replace("&quot;", '"')
+                    data = json.loads(raw)
+                    if data:
+                        img_url = max(
+                            data.items(),
+                            key=lambda kv: (kv[1][0] * kv[1][1]) if isinstance(kv[1], list) and len(kv[1]) == 2 else 0
+                        )[0]
+                except Exception:
+                    img_url = None
+
+            # 2) Amazon: hiRes field in inline JSON
+            if not img_url:
+                m = re.search(r'"hiRes":"(https[^"]+?)"', html)
+                if m:
+                    img_url = m.group(1).replace("\\/", "/")
+
+            # 3) Generic: og:image meta tag (works for Amazon, Flipkart, most sites)
+            if not img_url:
+                m = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html)
+                if m:
+                    img_url = m.group(1)
+
+            if not img_url:
+                log.info(f"[IMG-FETCH] ❌ No image found on landing page for {link}")
+                return None
+
+            async with session.get(img_url, timeout=aiohttp.ClientTimeout(total=12)) as img_resp:
+                if img_resp.status == 200:
+                    data = await img_resp.read()
+                    if data and len(data) > 500:
+                        return data
+    except Exception as e:
+        log.warning(f"[IMG-FETCH] ⚠️ Failed to fetch product image from {link}: {e}")
     return None
 
 # ══════════════════════════════════════════
@@ -3462,6 +3549,14 @@ async def handle_dealspouch(event):
 
     ist_now = get_ist_now()
     log.info(f"[DEALSPOUCH] ✅ Fresh | IST: {ist_now.strftime('%H:%M')} | deal_type={deal_type}")
+
+    # ── Step 1a: No image captured from source? Fetch one from the product page ──
+    if not media_bytes:
+        link_match = re.search(r'https?://amaz\.dealspouch\.com/\S+', text)
+        if link_match:
+            log.info("[IMG-FETCH] 🔎 No image in queue — fetching product image from landing page")
+            media_bytes = await fetch_product_image_bytes(link_match.group(0))
+            log.info(f"[IMG-FETCH] {'✅ Got image' if media_bytes else '❌ Still no image — will post text-only'}")
 
     # ── Step 1: Send to specialty WA first (fashion / beauty) ────
     if deal_type == "fashion":
