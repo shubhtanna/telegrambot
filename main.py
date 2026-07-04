@@ -2523,7 +2523,7 @@ from telethon.sessions import StringSession
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
-import asyncio, re, io, logging, time, aiohttp, os, threading, pytz, collections, random, json
+import asyncio, re, io, logging, time, aiohttp, os, threading, pytz, collections, random, json, itertools
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -3028,63 +3028,164 @@ async def fetch_product_image_bytes(link: str) -> bytes | None:
     return None
 
 # ══════════════════════════════════════════
+#  WHATSAPP SEND QUEUE (anti-detection + freshness-priority)
+#  WhatsApp flags accounts that fire many messages in quick
+#  succession, so every send goes through one background worker
+#  with a randomized human-like gap between sends.
+#  IMPORTANT: this is a PRIORITY queue, not FIFO — whenever the
+#  worker is ready to send, it always picks the MOST RECENTLY
+#  QUEUED job first. The backlog can grow as large as needed;
+#  older jobs simply wait longer while fresh ones keep cutting in.
+#  Jobs that age past WA_QUEUE_MAX_AGE_MINUTES are dropped instead
+#  of sent — a deal that's sat 20+ minutes is stale/likely gone,
+#  so sending it late does more harm than skipping it.
+# ══════════════════════════════════════════
+WA_MIN_GAP_SECONDS      = int(os.environ.get("WA_MIN_GAP_SECONDS", 8))
+WA_MAX_GAP_SECONDS      = int(os.environ.get("WA_MAX_GAP_SECONDS", 20))
+WA_QUEUE_MAX_AGE_MINUTES = int(os.environ.get("WA_QUEUE_MAX_AGE_MINUTES", 15))
+
+_wa_hour_window_start = time.time()
+_wa_hour_count        = 0
+WA_MAX_PER_HOUR       = int(os.environ.get("WA_MAX_PER_HOUR", 60))
+
+_wa_seq_counter    = itertools.count()
+_wa_priority_queue: "asyncio.PriorityQueue" = None   # created lazily inside the running loop
+_wa_worker_started = False
+_wa_last_send_time = 0.0
+
+def _wa_hourly_cap_ok() -> bool:
+    """Soft safety valve — drop sends past the hourly cap rather than risk a ban spike."""
+    global _wa_hour_window_start, _wa_hour_count
+    now = time.time()
+    if now - _wa_hour_window_start > 3600:
+        _wa_hour_window_start = now
+        _wa_hour_count = 0
+    if _wa_hour_count >= WA_MAX_PER_HOUR:
+        log.warning(f"[WA-QUEUE] 🛑 Hourly cap ({WA_MAX_PER_HOUR}) reached — dropping this send")
+        return False
+    _wa_hour_count += 1
+    return True
+
+async def _wa_sender_worker():
+    """Runs forever. Always pulls the newest queued job first (priority = -sequence)."""
+    global _wa_last_send_time
+    while True:
+        neg_seq, queued_at, job = await _wa_priority_queue.get()
+        backlog = _wa_priority_queue.qsize()
+
+        age_minutes = (time.time() - queued_at) / 60
+        if age_minutes > WA_QUEUE_MAX_AGE_MINUTES:
+            log.info(
+                f"[WA-QUEUE] 🗑️ Dropping stale job (seq={-neg_seq}, "
+                f"waited {age_minutes:.1f} min > {WA_QUEUE_MAX_AGE_MINUTES} min cap)"
+            )
+            _wa_priority_queue.task_done()
+            continue
+
+        if backlog:
+            log.info(f"[WA-QUEUE] 📬 Sending newest job (seq={-neg_seq}) — {backlog} older job(s) still waiting")
+
+        now = time.time()
+        remaining = WA_MIN_GAP_SECONDS - (now - _wa_last_send_time)
+        jitter = random.uniform(0, max(0, WA_MAX_GAP_SECONDS - WA_MIN_GAP_SECONDS))
+        delay = max(0.0, remaining) + jitter
+        if delay > 0:
+            await asyncio.sleep(delay)
+        _wa_last_send_time = time.time()
+
+        try:
+            await job()
+        except Exception as e:
+            log.error(f"[WA-QUEUE] ❌ Job failed: {e}")
+        finally:
+            _wa_priority_queue.task_done()
+
+def _ensure_wa_worker_started():
+    global _wa_priority_queue, _wa_worker_started
+    if _wa_priority_queue is None:
+        _wa_priority_queue = asyncio.PriorityQueue()
+    if not _wa_worker_started:
+        _wa_worker_started = True
+        asyncio.create_task(_wa_sender_worker())
+        log.info("[WA-QUEUE] 🚀 Background sender worker started")
+
+async def _enqueue_wa_job(job):
+    """Push a send job in; it jumps ahead of anything already waiting."""
+    _ensure_wa_worker_started()
+    seq = next(_wa_seq_counter)
+    await _wa_priority_queue.put((-seq, time.time(), job))
+    log.info(f"[WA-QUEUE] 📥 Job queued (seq={seq}) | backlog={_wa_priority_queue.qsize()}")
+
+# ══════════════════════════════════════════
 #  WHATSAPP SENDERS
 # ══════════════════════════════════════════
 async def send_to_whatsapp_bulk(text, image_bytes=None):
     if not BAILEYS_URL:
         log.warning("[WA-BULK] BAILEYS_URL not set!"); return
-    try:
-        async with aiohttp.ClientSession() as session:
-            if image_bytes:
-                form = aiohttp.FormData()
-                form.add_field("text", text or "")
-                form.add_field("secret", BAILEYS_SECRET)
-                form.add_field("image", image_bytes, filename="deal.jpg", content_type="image/jpeg")
-                async with session.post(f"{BAILEYS_URL}/send", data=form,
-                                        timeout=aiohttp.ClientTimeout(total=30)) as r:
-                    body = await r.text()
-                    if r.status != 200:
-                        log.error(f"[WA-BULK] ❌ HTTP {r.status} {body[:120]}"); return
-                    log.info(f"[WA-BULK] ✅ Queued! {body[:80]}")
-            else:
-                async with session.post(f"{BAILEYS_URL}/send",
-                                        json={"text": text, "secret": BAILEYS_SECRET},
-                                        timeout=aiohttp.ClientTimeout(total=30)) as r:
-                    body = await r.text()
-                    if r.status != 200:
-                        log.error(f"[WA-BULK] ❌ HTTP {r.status} {body[:120]}"); return
-                    log.info(f"[WA-BULK] ✅ Queued! {body[:80]}")
-        stats["sent_to_wa_bulk"] += 1
-    except Exception as e:
-        log.error(f"[WA-BULK] ❌ Failed: {e}")
+    if not _wa_hourly_cap_ok():
+        return
+
+    async def _job():
+        try:
+            async with aiohttp.ClientSession() as session:
+                if image_bytes:
+                    form = aiohttp.FormData()
+                    form.add_field("text", text or "")
+                    form.add_field("secret", BAILEYS_SECRET)
+                    form.add_field("image", image_bytes, filename="deal.jpg", content_type="image/jpeg")
+                    async with session.post(f"{BAILEYS_URL}/send", data=form,
+                                            timeout=aiohttp.ClientTimeout(total=30)) as r:
+                        body = await r.text()
+                        if r.status != 200:
+                            log.error(f"[WA-BULK] ❌ HTTP {r.status} {body[:120]}"); return
+                        log.info(f"[WA-BULK] ✅ Queued! {body[:80]}")
+                else:
+                    async with session.post(f"{BAILEYS_URL}/send",
+                                            json={"text": text, "secret": BAILEYS_SECRET},
+                                            timeout=aiohttp.ClientTimeout(total=30)) as r:
+                        body = await r.text()
+                        if r.status != 200:
+                            log.error(f"[WA-BULK] ❌ HTTP {r.status} {body[:120]}"); return
+                        log.info(f"[WA-BULK] ✅ Queued! {body[:80]}")
+            stats["sent_to_wa_bulk"] += 1
+        except Exception as e:
+            log.error(f"[WA-BULK] ❌ Failed: {e}")
+
+    await _enqueue_wa_job(_job)
 
 async def send_to_whatsapp_single(text, target_group, image_bytes=None):
     if not BAILEYS_URL:
         log.warning("[WA-SINGLE] BAILEYS_URL not set!"); return
-    try:
-        async with aiohttp.ClientSession() as session:
-            if image_bytes:
-                form = aiohttp.FormData()
-                form.add_field("text", text or "")
-                form.add_field("secret", BAILEYS_SECRET)
-                form.add_field("target", target_group)
-                form.add_field("image", image_bytes, filename="deal.jpg", content_type="image/jpeg")
-                async with session.post(f"{BAILEYS_URL}/send-single", data=form,
-                                        timeout=aiohttp.ClientTimeout(total=30)) as r:
-                    body = await r.text()
-                    if r.status != 200:
-                        log.error(f"[WA-SINGLE] ❌ HTTP {r.status} {body[:120]}"); return
-                    log.info(f"[WA-SINGLE] ✅ Sent to {target_group}! {body[:80]}")
-            else:
-                async with session.post(f"{BAILEYS_URL}/send-single",
-                                        json={"text": text, "secret": BAILEYS_SECRET, "target": target_group},
-                                        timeout=aiohttp.ClientTimeout(total=30)) as r:
-                    body = await r.text()
-                    if r.status != 200:
-                        log.error(f"[WA-SINGLE] ❌ HTTP {r.status} {body[:120]}"); return
-                    log.info(f"[WA-SINGLE] ✅ Sent to {target_group}! {body[:80]}")
-    except Exception as e:
-        log.error(f"[WA-SINGLE] ❌ Failed: {e}")
+    if not _wa_hourly_cap_ok():
+        return
+
+    async def _job():
+        try:
+            async with aiohttp.ClientSession() as session:
+                if image_bytes:
+                    form = aiohttp.FormData()
+                    form.add_field("text", text or "")
+                    form.add_field("secret", BAILEYS_SECRET)
+                    form.add_field("target", target_group)
+                    form.add_field("image", image_bytes, filename="deal.jpg", content_type="image/jpeg")
+                    async with session.post(f"{BAILEYS_URL}/send-single", data=form,
+                                            timeout=aiohttp.ClientTimeout(total=30)) as r:
+                        body = await r.text()
+                        if r.status != 200:
+                            log.error(f"[WA-SINGLE] ❌ HTTP {r.status} {body[:120]}"); return
+                        log.info(f"[WA-SINGLE] ✅ Sent to {target_group}! {body[:80]}")
+                else:
+                    async with session.post(f"{BAILEYS_URL}/send-single",
+                                            json={"text": text, "secret": BAILEYS_SECRET, "target": target_group},
+                                            timeout=aiohttp.ClientTimeout(total=30)) as r:
+                        body = await r.text()
+                        if r.status != 200:
+                            log.error(f"[WA-SINGLE] ❌ HTTP {r.status} {body[:120]}"); return
+                        log.info(f"[WA-SINGLE] ✅ Sent to {target_group}! {body[:80]}")
+        except Exception as e:
+            log.error(f"[WA-SINGLE] ❌ Failed: {e}")
+
+    await _enqueue_wa_job(_job)
 
 # ══════════════════════════════════════════
 #  PUSH TO DEALSPOUCH QUEUE
