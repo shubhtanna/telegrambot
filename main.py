@@ -2696,7 +2696,7 @@ def is_quiet_hours():
     now = get_ist_now()
     m = now.hour * 60 + now.minute
     open_minute = _get_daily_open_minute()
-    return (1 * 60) <= m < open_minute   # closes 1:00 AM, opens 7:00–8:00 AM (random daily)
+    return (0 * 60 + 30) <= m < open_minute   # closes 1:00 AM, opens 7:00–8:00 AM (random daily)
 
 # ══════════════════════════════════════════
 #  HEALTH CHECK
