@@ -2677,7 +2677,8 @@ def get_ist_now():
     return datetime.now(pytz.timezone("Asia/Kolkata"))
 
 _quiet_open_date   = None
-_quiet_open_minute = 7 * 60   # fallback default: 7:00 AM
+_quiet_open_minute = 7 * 60
+QUIET_CLOSE_MINUTE = 0 * 60 + 30   # fallback default: 7:00 AM
 
 def _get_daily_open_minute():
     """Pick a random wake-up time between 7:00–8:00 AM IST, once per day."""
@@ -2696,7 +2697,7 @@ def is_quiet_hours():
     now = get_ist_now()
     m = now.hour * 60 + now.minute
     open_minute = _get_daily_open_minute()
-    return (0 * 60 + 30) <= m < open_minute   # closes 1:00 AM, opens 7:00–8:00 AM (random daily)
+    return QUIET_CLOSE_MINUTE <= m < open_minute   # closes sharp 12:30 AM, opens 7:00–8:00 AM (random daily)  # closes 1:00 AM, opens 7:00–8:00 AM (random daily)
 
 # ══════════════════════════════════════════
 #  HEALTH CHECK
