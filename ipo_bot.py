@@ -109,21 +109,38 @@ RED_FLAG_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
+# General financial-awareness content (tax rules, cash-transaction limits,
+# etc.) sometimes gets posted in these same IPO groups. It won't match
+# IPO/GMP keywords, but Shubh wants it noticed rather than silently
+# dropped — it just always needs his review since the format varies wildly
+# and there's no fixed "shape" to trust blindly.
+FINANCE_INFO_HINT_RE = re.compile(
+    r'\b(income\s*tax|tax\s*notice|tds\b|pan\s*card|cash\s*deposit|cash\s*withdraw(?:al|n)?|'
+    r'sebi|demat|kyc|savings\s*account|current\s*account)\b',
+    re.IGNORECASE,
+)
+
 
 def classify_ipo_message(text: str) -> str:
     """Returns 'ignore', 'review', or 'auto'."""
     if not text or len(text.strip()) < 15:
         return "ignore"
-    if not re.search(r'\bIPO\b|\bGMP\b', text, re.IGNORECASE):
+
+    has_ipo_kw = bool(re.search(r'\bIPO\b|\bGMP\b', text, re.IGNORECASE))
+    has_finance_kw = bool(FINANCE_INFO_HINT_RE.search(text))
+    if not has_ipo_kw and not has_finance_kw:
         return "ignore"
+
     if RED_FLAG_PATTERNS.search(text):
         log.info("[CLASSIFY] Red-flag keyword matched -> review")
         return "review"
-    if not any(pat.search(text) for pat in IPO_TYPE_PATTERNS.values()):
-        # Doesn't fit any known shape — could still be legit, but we haven't
-        # seen this pattern before, so a human should confirm it once.
-        return "review"
-    return "auto"
+
+    if has_ipo_kw and any(pat.search(text) for pat in IPO_TYPE_PATTERNS.values()):
+        return "auto"
+
+    # Either general finance-info content, or IPO-flavored text that doesn't
+    # match a known shape — both get a human look rather than auto-sending.
+    return "review"
 
 
 # ══════════════════════════════════════════
@@ -143,6 +160,17 @@ GROUP_LABEL_LINE_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
+# Mid-sentence brand mentions like "Stay tuned with IPO Ji for complete IPO
+# updates" or "Follow XYZ Deals for more updates" — these don't start the
+# line the way GROUP_LABEL_LINE_RE expects, so they need their own check.
+# We only swap the captured name, keeping the rest of the sentence intact.
+THIRD_PARTY_TAGLINE_RE = re.compile(
+    r'\b(stay\s+(?:tuned|connected)\s+with|follow|courtesy\s+of|'
+    r'brought\s+to\s+you\s+by|presented\s+by|in\s+association\s+with)\s+'
+    r'([A-Za-z][\w]*(?:\s+[A-Za-z][\w]*){0,3}?)(\s+for\b|[.,!]|\n|$)',
+    re.IGNORECASE,
+)
+
 
 def clean_ipo_message(text: str) -> tuple[str, bool]:
     """
@@ -158,6 +186,14 @@ def clean_ipo_message(text: str) -> tuple[str, bool]:
 
     # Drop social-media promo lines entirely
     cleaned = SOCIAL_LINK_RE.sub('', cleaned)
+
+    # Swap mid-sentence taglines: "Stay tuned with IPO Ji for..." ->
+    # "Stay tuned with Ipo Insights India for..."
+    def _swap_tagline(m):
+        prefix, tail = m.group(1), m.group(3) or ""
+        return f"{prefix} {OUR_GROUP_NAME}{tail}"
+
+    cleaned = THIRD_PARTY_TAGLINE_RE.sub(_swap_tagline, cleaned)
 
     # Swap "Join X / Channel: Y / Powered by Z" lines for our own branding —
     # but leave alone anything that's actually IPO content (e.g. "Join now
@@ -187,46 +223,67 @@ def clean_ipo_message(text: str) -> tuple[str, bool]:
 #  words/numbers each message contains — order and extra lines don't
 #  matter for that, only which words are shared.
 # ══════════════════════════════════════════
+# ══════════════════════════════════════════
+#  STEP 3 — DUPLICATE DETECTION
+#  Many groups repost the same update within minutes — same wording, maybe
+#  a line added/removed — and that IS a duplicate. But a GMP/subscription
+#  update for the SAME IPO with DIFFERENT numbers (e.g. GMP moved ₹12 -> ₹7)
+#  is a genuinely new update and must always send, even though almost every
+#  label word (QIB, B-HNI, GMP, Total Sub, the company name...) is
+#  identical. So word-similarity alone can't decide this — the numbers are
+#  checked separately and are decisive: numbers differ -> never a duplicate.
+# ══════════════════════════════════════════
 DEDUP_WINDOW_SECONDS = 90 * 60
-DEDUP_SEQUENCE_THRESHOLD = 0.72   # character-level similarity
-DEDUP_TOKEN_JACCARD_THRESHOLD = 0.60   # shared-words similarity
+DEDUP_SEQUENCE_THRESHOLD = 0.72   # character-level similarity (word content)
+DEDUP_TOKEN_JACCARD_THRESHOLD = 0.60   # shared-words similarity (word content)
 
-_TOKEN_RE = re.compile(r'[a-z]+|\d+')
+_WORD_RE = re.compile(r'[a-z]+')
+_NUMBER_RE = re.compile(r'\d+(?:\.\d+)?')
 
-_sent_fingerprints: list[tuple[str, set, float]] = []  # (normalized_text, token_set, timestamp)
+_sent_fingerprints: list[tuple[str, set, tuple, float]] = []  # (norm_text, word_set, numbers, timestamp)
 
 
 def _normalize_for_dedup(text: str) -> str:
     t = text.lower()
     t = re.sub(r'https?://\S+', '', t)
-    t = re.sub(r'[^\w\s]', '', t)
+    t = re.sub(r'[^\w\s.]', '', t)  # keep '.' so decimals like 1.65 survive
     return re.sub(r'\s+', ' ', t).strip()
 
 
-def _token_set(normalized_text: str) -> set:
-    return set(_TOKEN_RE.findall(normalized_text))
+def _word_set(normalized_text: str) -> set:
+    return set(_WORD_RE.findall(normalized_text))
+
+
+def _numbers(text: str) -> tuple:
+    return tuple(sorted(_NUMBER_RE.findall(text)))
 
 
 def is_duplicate(text: str) -> bool:
     now = time.time()
-    while _sent_fingerprints and now - _sent_fingerprints[0][2] > DEDUP_WINDOW_SECONDS:
+    while _sent_fingerprints and now - _sent_fingerprints[0][3] > DEDUP_WINDOW_SECONDS:
         _sent_fingerprints.pop(0)
 
     norm = _normalize_for_dedup(text)
-    tokens = _token_set(norm)
-    for old_norm, old_tokens, _ in _sent_fingerprints:
+    words = _word_set(norm)
+    nums = _numbers(text)
+
+    for old_norm, old_words, old_nums, _ in _sent_fingerprints:
+        if nums != old_nums:
+            continue  # numbers changed -> genuinely new data, not a duplicate, regardless of wording
+
         seq_ratio = difflib.SequenceMatcher(None, norm, old_norm).ratio()
-        union = tokens | old_tokens
-        jaccard = (len(tokens & old_tokens) / len(union)) if union else 0.0
+        union = words | old_words
+        jaccard = (len(words & old_words) / len(union)) if union else 0.0
         if seq_ratio >= DEDUP_SEQUENCE_THRESHOLD or jaccard >= DEDUP_TOKEN_JACCARD_THRESHOLD:
-            log.info(f"[DEDUP] Matches an already-sent update (text={seq_ratio:.0%}, words={jaccard:.0%}) — skipping")
+            log.info(f"[DEDUP] Same numbers + matching wording (text={seq_ratio:.0%}, words={jaccard:.0%}) — skipping")
             return True
     return False
 
 
 def _remember_sent(text: str):
     norm = _normalize_for_dedup(text)
-    _sent_fingerprints.append((norm, _token_set(norm), time.time()))
+    _sent_fingerprints.append((norm, _word_set(norm), _numbers(text), time.time()))
+
 
 
 # ══════════════════════════════════════════
