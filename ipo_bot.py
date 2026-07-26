@@ -449,18 +449,29 @@ async def handle_ipo_source(event):
     if is_duplicate(cleaned):
         log.info("[IPO] Duplicate of a recently sent update — skipped")
         return
-    _remember_sent(cleaned)  # mark BEFORE any awaits, so a near-simultaneous
-                              # repost from another group can't slip past this check
-
-    has_media = bool(
-        event.message.media and isinstance(event.message.media, (MessageMediaPhoto, MessageMediaDocument))
-    )
-    media = await _download_media(event.message)
 
     # Images can carry another group's watermark or name baked directly
     # into the picture — text cleaning can't touch that, so any message
     # with an image ALWAYS goes to review, no matter how clean the text is.
-    if verdict == "auto" and confident and not has_media:
+    # This check is synchronous (no await), so we can decide the branch
+    # before downloading media.
+    has_media = bool(
+        event.message.media and isinstance(event.message.media, (MessageMediaPhoto, MessageMediaDocument))
+    )
+    going_auto = verdict == "auto" and confident and not has_media
+
+    if going_auto:
+        # Mark as sent BEFORE the media-download await, so a near-simultaneous
+        # repost from another group can't slip past this check. Messages
+        # headed to review are NOT marked here — marking a message "sent"
+        # before it's actually been approved and sent was the bug: it made
+        # the real send (after your approval) look like a duplicate of
+        # itself and get skipped.
+        _remember_sent(cleaned)
+
+    media = await _download_media(event.message)
+
+    if going_auto:
         log.info("[IPO] Matches a known structure, no red flags, no image — sending directly")
         await send_ipo_to_whatsapp(cleaned, media)
     else:
