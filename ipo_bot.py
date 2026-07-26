@@ -452,13 +452,20 @@ async def handle_ipo_source(event):
     _remember_sent(cleaned)  # mark BEFORE any awaits, so a near-simultaneous
                               # repost from another group can't slip past this check
 
+    has_media = bool(
+        event.message.media and isinstance(event.message.media, (MessageMediaPhoto, MessageMediaDocument))
+    )
     media = await _download_media(event.message)
 
-    if verdict == "auto" and confident:
-        log.info("[IPO] Matches a known structure, no red flags — sending directly")
+    # Images can carry another group's watermark or name baked directly
+    # into the picture — text cleaning can't touch that, so any message
+    # with an image ALWAYS goes to review, no matter how clean the text is.
+    if verdict == "auto" and confident and not has_media:
+        log.info("[IPO] Matches a known structure, no red flags, no image — sending directly")
         await send_ipo_to_whatsapp(cleaned, media)
     else:
-        log.info(f"[IPO] Needs a look (verdict={verdict}, confident={confident}) — routing to review")
+        reason = "has an image, needs your eyes on it first" if has_media else f"needs a look (verdict={verdict}, confident={confident})"
+        log.info(f"[IPO] {reason} — routing to review")
         await send_for_review(cleaned, media)
 
 
