@@ -30,7 +30,7 @@ import logging
 import os
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import unquote, urlparse, parse_qs
 from zoneinfo import ZoneInfo
@@ -68,6 +68,7 @@ WA_GROUPS = [g.strip() for g in os.environ.get("EARNKARO_WA_GROUPS", "").split("
 BULK_WA_GROUPS = [g.strip() for g in os.environ.get("EARNKARO_BULK_WA_GROUPS", "").split(",") if g.strip()]
 
 IST = ZoneInfo("Asia/Kolkata")
+ACTIVE_START_HOUR = 8  # 8:00 AM IST — quiet hours run from 1:00 AM to 7:59 AM
 # 10:00–15:00 and 18:00–23:59 IST — each fires exactly once per day, the
 # first time the main loop's regular tick lands inside that window.
 BULK_WINDOWS = {
@@ -573,6 +574,13 @@ def _current_bulk_window(now_ist: datetime) -> str | None:
     return None
 
 
+def _seconds_until_next_active_window(now_ist: datetime) -> float:
+    wake_at = now_ist.replace(hour=ACTIVE_START_HOUR, minute=0, second=0, microsecond=0)
+    if wake_at <= now_ist:
+        wake_at += timedelta(days=1)
+    return (wake_at - now_ist).total_seconds()
+
+
 async def maybe_bulk_broadcast(state: dict, text: str, image_bytes: bytes | None):
     """Twice a day (once 10am-3pm IST, once 6pm-midnight IST), broadcast
     whatever card just went to the credit-card group to every other deal
@@ -656,6 +664,13 @@ async def run(discover_only: bool = False, test_one: bool = False):
 
         while True:
             try:
+                now_ist = datetime.now(IST)
+                if now_ist.hour < ACTIVE_START_HOUR:
+                    sleep_secs = _seconds_until_next_active_window(now_ist)
+                    log.info(f"[SCHEDULE] Outside active hours (1am-8am IST) — sleeping {sleep_secs/3600:.1f}h until 8am")
+                    await asyncio.sleep(sleep_secs)
+                    continue
+
                 card_links = await get_card_links(page)
                 if not card_links:
                     log.error("[MAIN] No card links found — check EARNKARO_LISTING_URL and that the session is still valid")

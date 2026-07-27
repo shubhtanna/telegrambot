@@ -12,6 +12,7 @@ WHY A SEPARATE FILE (not added inside main.py):
 """
 
 import asyncio, re, io, logging, time, os, itertools, difflib
+from datetime import datetime, timedelta
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
@@ -27,6 +28,7 @@ import aiohttp
 # (running `python ipo_bot.py` from a different folder than the .env file
 # sits in) is the #1 reason .env "doesn't load".
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 _ENV_PATH = Path(__file__).resolve().parent / ".env"
@@ -84,6 +86,8 @@ OUR_GROUP_NAME   = "Ipo Insights India"
 OUR_WA_JOIN_LINK = "https://chat.whatsapp.com/FduFNuuOdNv0FuKjRPa7Yh"
 
 client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
+IST = ZoneInfo("Asia/Kolkata")
+ACTIVE_START_HOUR = 8  # 8:00 AM IST — quiet hours run from 1:00 AM to 7:59 AM
 
 # ══════════════════════════════════════════
 #  STEP 1 — MESSAGE TYPE CLASSIFIER
@@ -285,6 +289,13 @@ def _remember_sent(text: str):
     _sent_fingerprints.append((norm, _word_set(norm), _numbers(text), time.time()))
 
 
+def _seconds_until_next_active_window(now_ist: datetime) -> float:
+    wake_at = now_ist.replace(hour=ACTIVE_START_HOUR, minute=0, second=0, microsecond=0)
+    if wake_at <= now_ist:
+        wake_at += timedelta(days=1)
+    return (wake_at - now_ist).total_seconds()
+
+
 
 # ══════════════════════════════════════════
 #  STEP 4 — WHATSAPP SENDER
@@ -298,6 +309,12 @@ async def send_ipo_to_whatsapp(text: str, image_bytes: bytes | None = None):
     if not IPO_WA_GROUPS:
         log.warning("[WA] IPO_WA_GROUPS not configured — cannot send")
         return
+
+    now_ist = datetime.now(IST)
+    if now_ist.hour < ACTIVE_START_HOUR:
+        sleep_secs = _seconds_until_next_active_window(now_ist)
+        log.info(f"[WA] Outside active hours (1am-8am IST) — waiting {sleep_secs/3600:.1f}h until 8am")
+        await asyncio.sleep(sleep_secs)
 
     async with aiohttp.ClientSession() as session:
         for target in IPO_WA_GROUPS:
