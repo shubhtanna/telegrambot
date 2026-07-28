@@ -500,7 +500,6 @@ async def run():
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
-            channel="chrome",  # real installed Chrome, not bundled Chromium — passes more anti-bot checks
             headless=True,
             args=["--disable-blink-features=AutomationControlled"],
         )
