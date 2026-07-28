@@ -56,7 +56,7 @@ log = logging.getLogger("fashion_beauty_bot")
 LINKS_FILE = Path(os.environ.get("EARNKARO_ALL_PRODUCTS_FILE", str(Path(__file__).resolve().parent / "product_links.txt")))
 STATE_FILE = Path(os.environ.get("EARNKARO_FB_STATE_FILE", str(Path(__file__).resolve().parent / "fashion_beauty_state.json")))
 # Default gap between deals is 45 minutes; can still be overridden via env.
-INTERVAL_SECONDS = int(os.environ.get("EARNKARO_FB_INTERVAL_SECONDS", 45 * 60))
+INTERVAL_SECONDS = int(os.environ.get("EARNKARO_FB_INTERVAL_SECONDS", 5 * 60))
 DEBUG_DUMP_DIR = Path(os.environ.get("EARNKARO_DEBUG_DIR", str(Path(__file__).resolve().parent / "debug_dumps")))
 
 BAILEYS_URL = os.environ.get("BAILEYS_URL")
@@ -500,6 +500,7 @@ async def run():
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
+            channel="chrome",  # real installed Chrome, not bundled Chromium — passes more anti-bot checks
             headless=True,
             args=["--disable-blink-features=AutomationControlled"],
         )
