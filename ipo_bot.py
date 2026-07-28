@@ -113,6 +113,19 @@ RED_FLAG_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
+# Messages plugging a THIRD-PARTY app (e.g. "Check your allotment on IPOwiz
+# app", a play-store/app-store mention, or a link ending in /download) are
+# effectively free advertising for a competing platform, not real IPO
+# content — so these always get routed to review instead of auto-sending,
+# no matter how "IPO-shaped" the rest of the text looks.
+APP_PROMO_PATTERN = re.compile(
+    r'(?:\bdownload\b.{0,25}\bapp\b|\bapp\b.{0,25}\bdownload\b|'
+    r'\ballotment\b.{0,25}\bapp\b|\bapp\b.{0,25}\ballotment\b|'
+    r'play\s*store|app\s*store|google\s*play|'
+    r'https?://\S+/download\b)',
+    re.IGNORECASE,
+)
+
 # General financial-awareness content (tax rules, cash-transaction limits,
 # etc.) sometimes gets posted in these same IPO groups. It won't match
 # IPO/GMP keywords, but Shubh wants it noticed rather than silently
@@ -135,8 +148,8 @@ def classify_ipo_message(text: str) -> str:
     if not has_ipo_kw and not has_finance_kw:
         return "ignore"
 
-    if RED_FLAG_PATTERNS.search(text):
-        log.info("[CLASSIFY] Red-flag keyword matched -> review")
+    if RED_FLAG_PATTERNS.search(text) or APP_PROMO_PATTERN.search(text):
+        log.info("[CLASSIFY] Red-flag or app-promo keyword matched -> review")
         return "review"
 
     if has_ipo_kw and any(pat.search(text) for pat in IPO_TYPE_PATTERNS.values()):
