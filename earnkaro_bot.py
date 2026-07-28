@@ -58,23 +58,14 @@ BAILEYS_URL = os.environ.get("BAILEYS_URL")
 BAILEYS_SECRET = os.environ.get("BAILEYS_SECRET", "mysecret123")
 WA_GROUPS = [g.strip() for g in os.environ.get("EARNKARO_WA_GROUPS", "").split(",") if g.strip()]
 
-# Twice a day, whatever card just went to the credit-card group (WA_GROUPS)
-# ALSO gets broadcast to every other deal group — but never Flipkart,
-# Fashion, or Beauty groups, since a credit card offer doesn't fit those.
-# List every group you want in the broad broadcast EXCEPT those three
-# categories here. The credit-card group(s) in EARNKARO_WA_GROUPS are
-# automatically excluded from this list in code below (even if you
-# accidentally include them here) — so it can never post there twice.
+# Bulk broadcasts fan out immediately to the groups listed in
+# EARNKARO_BULK_WA_GROUPS whenever a credit-card deal is sent to the main
+# credit-card group. The credit-card group(s) in EARNKARO_WA_GROUPS are
+# automatically excluded below so they never receive the same card twice.
 BULK_WA_GROUPS = [g.strip() for g in os.environ.get("EARNKARO_BULK_WA_GROUPS", "").split(",") if g.strip()]
 
 IST = ZoneInfo("Asia/Kolkata")
 ACTIVE_START_HOUR = 8  # 8:00 AM IST — quiet hours run from 1:00 AM to 7:59 AM
-# 10:00–15:00 and 18:00–23:59 IST — each fires exactly once per day, the
-# first time the main loop's regular tick lands inside that window.
-BULK_WINDOWS = {
-    "morning": (10, 15),
-    "evening": (18, 24),
-}
 
 FEES_HEADING_RE = re.compile(r'\bFEES\b.{0,30}\bCHARGES\b', re.IGNORECASE)
 STOP_SECTION_RE = re.compile(
@@ -566,14 +557,6 @@ async def send_card_to_whatsapp(text: str, image_bytes: bytes | None):
     await send_to_targets(text, image_bytes, WA_GROUPS)
 
 
-def _current_bulk_window(now_ist: datetime) -> str | None:
-    h = now_ist.hour
-    for name, (start, end) in BULK_WINDOWS.items():
-        if start <= h < end:
-            return name
-    return None
-
-
 def _seconds_until_next_active_window(now_ist: datetime) -> float:
     wake_at = now_ist.replace(hour=ACTIVE_START_HOUR, minute=0, second=0, microsecond=0)
     if wake_at <= now_ist:
@@ -581,35 +564,19 @@ def _seconds_until_next_active_window(now_ist: datetime) -> float:
     return (wake_at - now_ist).total_seconds()
 
 
-async def maybe_bulk_broadcast(state: dict, text: str, image_bytes: bytes | None):
-    """Twice a day (once 10am-3pm IST, once 6pm-midnight IST), broadcast
-    whatever card just went to the credit-card group to every other deal
-    group too — excluding Flipkart/Fashion/Beauty (never in BULK_WA_GROUPS
-    to begin with) and excluding the credit-card group itself (removed
-    here even if it was accidentally left in BULK_WA_GROUPS), so it never
-    posts there twice."""
+async def maybe_bulk_broadcast(text: str, image_bytes: bytes | None):
+    """Fan out the same card to the configured bulk groups immediately after
+    the main credit-card group message is sent."""
     if not BULK_WA_GROUPS:
         return
 
-    now_ist = datetime.now(IST)
-    window = _current_bulk_window(now_ist)
-    if not window:
-        return
-
-    today_str = now_ist.date().isoformat()
-    state_key = f"bulk_{window}_date"
-    if state.get(state_key) == today_str:
-        return  # already done for this window today
-
     targets = [g for g in BULK_WA_GROUPS if g not in WA_GROUPS]
     if not targets:
-        log.info(f"[BULK] {window} window — no targets left after excluding the credit-card group(s)")
-    else:
-        log.info(f"[BULK] {window.capitalize()} broadcast window — sending to {len(targets)} group(s)")
-        await send_to_targets(text, image_bytes, targets)
+        log.info("[BULK] No bulk targets left after excluding the credit-card group(s)")
+        return
 
-    state[state_key] = today_str
-    _save_state(state)
+    log.info(f"[BULK] Sending to {len(targets)} bulk group(s)")
+    await send_to_targets(text, image_bytes, targets)
 
 
 # ══════════════════════════════════════════
@@ -686,7 +653,7 @@ async def run(discover_only: bool = False, test_one: bool = False):
                     message = build_message(card)
                     image_bytes = await download_image(card["image_url"])
                     await send_card_to_whatsapp(message, image_bytes)
-                    await maybe_bulk_broadcast(state, message, image_bytes)
+                    await maybe_bulk_broadcast(message, image_bytes)
                 else:
                     log.warning("[MAIN] Skipped this card due to a scrape issue — advancing to the next one anyway")
 
