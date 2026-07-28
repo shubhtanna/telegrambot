@@ -16,12 +16,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# THE STEP THAT WAS MISSING: downloads the actual Chromium browser AND
-# its required Linux system libraries (fonts, graphics libs, etc.) via
-# apt — "--with-deps" is what installs those system libraries, not just
-# the browser file itself. This runs as root during the Docker build,
-# which is what makes apt-get work here without extra permission setup.
-RUN python -m playwright install --with-deps chromium
+# Install Chromium + Google Chrome along with all required Linux dependencies
+RUN python -m playwright install --with-deps chromium chrome
 
 COPY . .
 

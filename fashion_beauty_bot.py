@@ -17,12 +17,12 @@ the live title is used instead, since the file can occasionally have a
 stale/misaligned title for a given link.
 
 Routing:
-    fashion -> FASHION_WA_GROUP_ID + bulk groups
-    beauty  -> BEAUTY_WA_GROUP_ID  + bulk groups
-    other   -> bulk groups only (no single group)
+    fashion -> FASHION_WA_GROUP_ID + bulk groups (every send)
+    beauty  -> BEAUTY_WA_GROUP_ID  + bulk groups (every send)
+    other   -> bulk groups only, every 2nd tick (hourly, when
+               INTERVAL_SECONDS is at its normal 1800s setting)
 
-Bulk broadcast only fires every 2nd tick (hourly, when INTERVAL_SECONDS
-is at its normal 1800s setting). Active 8am-12am IST.
+Active 8am-12am IST.
 
 >>> EDIT THESE TWO BEFORE RUNNING <
 """
@@ -298,8 +298,16 @@ async def _extract_image(page) -> str | None:
 async def _extract_live_title(page) -> str | None:
     """og:title first — curated specifically for the product, far less
     likely to accidentally pick up an unrelated widget's error text than
-    a bare h1/h2 selector. Falls back to headings, then <title>, always
-    filtering out known junk text (broken video-widget errors, etc.)."""
+    a bare h1/h2 selector. Falls back to headings.
+
+    IMPORTANT: many retailer pages (Myntra, Ajio, etc.) split the title
+    across TWO headings — a short brand/category eyebrow first (e.g.
+    "MCaffeine" or "BODYCARE") and the actual descriptive product name
+    second (e.g. "Coffee Body Massage & Polishing Oil..."). Stopping at
+    the first heading alone returns just the brand name and throws off
+    title-matching against the file. So we now combine up to the first
+    two non-junk headings into one string, unless the very first one is
+    already long enough (>25 chars) to be a complete title on its own."""
     try:
         og_title = await page.get_attribute('meta[property="og:title"]', "content")
         if og_title and not JUNK_TITLE_RE.search(og_title):
@@ -309,10 +317,16 @@ async def _extract_live_title(page) -> str | None:
 
     try:
         headings = await page.query_selector_all("h1, h2")
+        parts = []
         for h in headings:
             text = (await h.inner_text()).strip()
-            if text and len(text) > 3 and not JUNK_TITLE_RE.search(text):
-                return text
+            if not text or len(text) <= 2 or JUNK_TITLE_RE.search(text):
+                continue
+            parts.append(text)
+            if len(parts) >= 2 or len(text) > 25:
+                break
+        if parts:
+            return " ".join(parts)
     except Exception:
         pass
 
@@ -499,11 +513,26 @@ async def run():
     tick_count = state.get("tick_count", 0)
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(
-            channel="chrome",  # real installed Chrome, not bundled Chromium — passes more anti-bot checks
+        # Prefer a real installed Chrome (passes more anti-bot checks than
+        # bundled Chromium) — but that binary only exists if "playwright
+        # install chrome" was run on this machine/image. Railway/most
+        # container hosts won't have it unless you add that install step,
+        # so we fall back to Playwright's own bundled Chromium instead of
+        # crashing the whole process.
+        launch_args = dict(
             headless=True,
             args=["--disable-blink-features=AutomationControlled"],
         )
+        try:
+            browser = await pw.chromium.launch(channel="chrome", **launch_args)
+        except Exception as e:
+            log.warning(
+                f"[BROWSER] Real Chrome channel unavailable ({e}) — "
+                "falling back to Playwright's bundled Chromium. To use real "
+                "Chrome instead, add `playwright install --with-deps chrome` "
+                "to your build step."
+            )
+            browser = await pw.chromium.launch(**launch_args)
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -565,11 +594,14 @@ async def run():
             # "other" -> no single group
 
             tick_count += 1
-            if tick_count % 2 == 0:  # every 2nd tick = every 1 hour (at normal 1800s interval)
-                bulk_targets = [g for g in BULK_WA_GROUPS if g != single_group_used]
-                if bulk_targets:
-                    log.info(f"[BULK] Hourly broadcast ({category}) — sending to {len(bulk_targets)} group(s)")
-                    await send_to_targets(message, image_bytes, bulk_targets)
+            bulk_targets = [g for g in BULK_WA_GROUPS if g != single_group_used]
+
+            # Every deal — fashion, beauty, or other — now goes to the bulk
+            # groups right away. The old hourly throttle (every 2nd tick)
+            # is gone entirely.
+            if bulk_targets:
+                log.info(f"[BULK] {category} deal — sending to {len(bulk_targets)} bulk group(s)")
+                await send_to_targets(message, image_bytes, bulk_targets)
 
             state["tick_count"] = tick_count
             _save_state(state)
