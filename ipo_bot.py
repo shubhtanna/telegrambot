@@ -126,6 +126,30 @@ APP_PROMO_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Promotional plumbing that should never be auto-sent directly. If a source
+# post is mostly asking people to join/follow/subscribe/share or points at a
+# Telegram/Facebook/Twitter/X/WhatsApp channel, it goes to review first so the
+# branding can be checked and normalized manually.
+PROMO_CALL_TO_ACTION_PATTERN = re.compile(
+    r'\b(?:join(?:\s+(?:our|us))?|follow(?:\s+us)?|subscribe(?:\s+us)?|'
+    r'share(?:\s+(?:this|it|us))?|like(?:\s+and\s+share)?|'
+    r'join\s+our\s+(?:channel|group|telegram|whatsapp(?:\s+group)?)|'
+    r'our\s+(?:channel|group|telegram|whatsapp(?:\s+group)?)|'
+    r'whatsapp\s+group|telegram\s+channel|telegram\s+group)\b',
+    re.IGNORECASE,
+)
+
+PROMO_SOCIAL_LINK_PATTERN = re.compile(
+    r'https?://(?:www\.)?(?:instagram\.com|twitter\.com|x\.com|youtube\.com|youtu\.be|'
+    r'facebook\.com|fb\.me|t\.me|telegram\.me|whatsapp\.com)/\S+',
+    re.IGNORECASE,
+)
+
+SOURCE_BRAND_PATTERN = re.compile(
+    r'\bipo\s*(?:ji|wiz|academy|acend(?:a)?my)\b',
+    re.IGNORECASE,
+)
+
 # General financial-awareness content (tax rules, cash-transaction limits,
 # etc.) sometimes gets posted in these same IPO groups. It won't match
 # IPO/GMP keywords, but Shubh wants it noticed rather than silently
@@ -143,8 +167,17 @@ def classify_ipo_message(text: str) -> str:
     if not text or len(text.strip()) < 15:
         return "ignore"
 
+    promo_signal = bool(
+        PROMO_CALL_TO_ACTION_PATTERN.search(text)
+        or PROMO_SOCIAL_LINK_PATTERN.search(text)
+    )
     has_ipo_kw = bool(re.search(r'\bIPO\b|\bGMP\b', text, re.IGNORECASE))
     has_finance_kw = bool(FINANCE_INFO_HINT_RE.search(text))
+
+    if promo_signal:
+        log.info("[CLASSIFY] Promo / social / source-brand text matched -> review")
+        return "review"
+
     if not has_ipo_kw and not has_finance_kw:
         return "ignore"
 
@@ -173,7 +206,7 @@ SOCIAL_LINK_RE = re.compile(
 
 # Lines that exist only to plug the source's own group/channel
 GROUP_LABEL_LINE_RE = re.compile(
-    r'^.{0,15}(?:join(?:\s+us)?|group|channel|powered\s+by|source|follow\s+us)\s*[:\-]?\s*.*$',
+    r'^.{0,20}(?:join(?:\s+us)?|group|channel|powered\s+by|source|follow\s+us|subscribe(?:\s+us)?|share(?:\s+this)?|telegram|whatsapp(?:\s+group)?)\s*[:\-]?\s*.*$',
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -198,11 +231,15 @@ def clean_ipo_message(text: str) -> tuple[str, bool]:
     """
     cleaned = text
 
+    # Normalize common source-brand names into our own branding so the
+    # review copy is easier to approve and reshare.
+    cleaned = SOURCE_BRAND_PATTERN.sub(OUR_GROUP_NAME, cleaned)
+
     # Any WhatsApp invite link that isn't ours -> replace with ours
     cleaned = WA_LINK_RE.sub(OUR_WA_JOIN_LINK, cleaned)
 
     # Drop social-media promo lines entirely
-    cleaned = SOCIAL_LINK_RE.sub('', cleaned)
+    cleaned = PROMO_SOCIAL_LINK_PATTERN.sub('', cleaned)
 
     # Swap mid-sentence taglines: "Stay tuned with IPO Ji for..." ->
     # "Stay tuned with Ipo Insights India for..."
