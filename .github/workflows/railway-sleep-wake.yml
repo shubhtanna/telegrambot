@@ -1,0 +1,83 @@
+# ══════════════════════════════════════════════════════════════
+#  railway-sleep-wake.yml
+#  Put this file at: .github/workflows/railway-sleep-wake.yml
+#  in the SAME GitHub repo that Railway deploys from.
+#
+#  WHAT THIS DOES
+#  ─────────────────────────────────────────────────────────────
+#  Two scheduled jobs call Railway's GraphQL API:
+#    1. "sleep"  → stops the deployment at 1:00 AM IST
+#    2. "wake"   → restarts the SAME deployment at 7:00 AM IST
+#                  (no rebuild, so it comes back in seconds)
+#
+#  GitHub Actions cron always runs in UTC, so the times below
+#  are the UTC equivalent of 1:00 AM / 7:00 AM IST
+#  (IST = UTC + 5:30):
+#     1:00 AM IST  ==  19:30 UTC (previous day)
+#     7:00 AM IST  ==  01:30 UTC
+# ══════════════════════════════════════════════════════════════
+
+name: Railway Sleep / Wake Schedule
+
+on:
+  schedule:
+    - cron: "30 19 * * *"   # 1:00 AM IST  -> stop
+    - cron: "30 1 * * *"    # 7:00 AM IST  -> restart
+  workflow_dispatch:         # lets you trigger it manually to test
+
+jobs:
+  sleep-or-wake:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Decide action based on trigger time
+        id: decide
+        run: |
+          # GITHUB_EVENT_SCHEDULE tells us which cron line fired.
+          if [ "${{ github.event.schedule }}" = "30 19 * * *" ]; then
+            echo "action=stop" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.schedule }}" = "30 1 * * *" ]; then
+            echo "action=restart" >> "$GITHUB_OUTPUT"
+          else
+            # manual run via workflow_dispatch -> default to "stop"
+            echo "action=stop" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Get latest deployment ID
+        id: getdeploy
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          SERVICE_ID: ${{ secrets.RAILWAY_SERVICE_ID }}
+          ENVIRONMENT_ID: ${{ secrets.RAILWAY_ENVIRONMENT_ID }}
+        run: |
+          RESPONSE=$(curl -s -X POST https://backboard.railway.com/graphql/v2 \
+            -H "Authorization: Bearer $RAILWAY_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"query\":\"query(\$serviceId: String!, \$environmentId: String!) { serviceInstance(serviceId: \$serviceId, environmentId: \$environmentId) { latestDeployment { id status } } }\",\"variables\":{\"serviceId\":\"$SERVICE_ID\",\"environmentId\":\"$ENVIRONMENT_ID\"}}")
+
+          echo "Raw response: $RESPONSE"
+          DEPLOY_ID=$(echo "$RESPONSE" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+          echo "deploy_id=$DEPLOY_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Stop deployment (quiet hours start)
+        if: steps.decide.outputs.action == 'stop'
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          DEPLOY_ID: ${{ steps.getdeploy.outputs.deploy_id }}
+        run: |
+          curl -s -X POST https://backboard.railway.com/graphql/v2 \
+            -H "Authorization: Bearer $RAILWAY_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"query\":\"mutation(\$id: String!) { deploymentStop(id: \$id) }\",\"variables\":{\"id\":\"$DEPLOY_ID\"}}"
+          echo "Stopped deployment $DEPLOY_ID"
+
+      - name: Restart deployment (quiet hours end)
+        if: steps.decide.outputs.action == 'restart'
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          DEPLOY_ID: ${{ steps.getdeploy.outputs.deploy_id }}
+        run: |
+          curl -s -X POST https://backboard.railway.com/graphql/v2 \
+            -H "Authorization: Bearer $RAILWAY_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"query\":\"mutation(\$id: String!) { deploymentRestart(id: \$id) }\",\"variables\":{\"id\":\"$DEPLOY_ID\"}}"
+          echo "Restarted deployment $DEPLOY_ID"
