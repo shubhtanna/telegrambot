@@ -250,11 +250,11 @@ async def _extract_price_fallback(page, body_text: str) -> str | None:
     return amounts[0] if amounts else None
 
 
+# Replace _extract_image with this — adds a pixel-variance check on top of
+# the existing size/aspect filters, to reject near-solid-color swatch/shade
+# images (common on cosmetics pages) in favor of the real product photo.
+
 async def _extract_image(page) -> str | None:
-    """Real product images first, filtered by both minimum size AND
-    aspect ratio (rejects wide/short promotional banner strips, which
-    otherwise can win purely on raw pixel area). og:image (a small
-    social-preview thumbnail on most sites) is only a last resort."""
     try:
         await page.wait_for_function(
             "() => Array.from(document.querySelectorAll('img')).some(i => i.naturalWidth > 300)",
@@ -265,12 +265,35 @@ async def _extract_image(page) -> str | None:
 
     try:
         imgs = await page.evaluate("""
-            () => Array.from(document.querySelectorAll('img')).map(img => ({
-                src: img.currentSrc || img.src,
-                w: img.naturalWidth || 0,
-                h: img.naturalHeight || 0
-            })).filter(i => i.src)
+            () => Array.from(document.querySelectorAll('img')).map(img => {
+                let variance = -1;  // -1 = couldn't check (e.g. CORS-tainted canvas)
+                try {
+                    const w = Math.min(img.naturalWidth, 60);
+                    const h = Math.min(img.naturalHeight, 60);
+                    const canvas = document.createElement('canvas');
+                    canvas.width = w; canvas.height = h;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0, w, h);
+                    const data = ctx.getImageData(0, 0, w, h).data;
+                    let sum = 0, sumSq = 0, n = 0;
+                    for (let i = 0; i < data.length; i += 4) {
+                        const lum = (data[i] + data[i+1] + data[i+2]) / 3;
+                        sum += lum; sumSq += lum * lum; n++;
+                    }
+                    const mean = sum / n;
+                    variance = Math.sqrt(Math.max(0, sumSq / n - mean * mean));
+                } catch (e) {
+                    variance = -1;
+                }
+                return {
+                    src: img.currentSrc || img.src,
+                    w: img.naturalWidth || 0,
+                    h: img.naturalHeight || 0,
+                    variance: variance,
+                };
+            }).filter(i => i.src)
         """)
+
         candidates = []
         for i in imgs:
             area = i["w"] * i["h"]
@@ -279,9 +302,19 @@ async def _extract_image(page) -> str | None:
             aspect = i["w"] / i["h"] if i["h"] else 0
             if not (0.5 <= aspect <= 1.6):
                 continue
-            candidates.append({"src": i["src"], "area": area})
+            # Reject near-solid-color images (shade/color swatches) — a real
+            # product photo has visual detail and much higher variance.
+            # variance == -1 means we couldn't check (CORS-tainted canvas,
+            # common for cross-origin images) — don't penalize those, since
+            # most real photos will ALSO be tainted; we just can't use this
+            # signal to help in that case.
+            if 0 <= i["variance"] < 8:
+                log.info(f"[IMAGE] Rejected near-solid-color image (variance={i['variance']:.1f}, likely a shade/color swatch): {i['src']}")
+                continue
+            candidates.append(i)
+
         if candidates:
-            return max(candidates, key=lambda c: c["area"])["src"]
+            return max(candidates, key=lambda c: c["w"] * c["h"])["src"]
     except Exception:
         pass
 
