@@ -27,7 +27,7 @@ import time
 SCRIPTS = [
     ("main.py", "MAIN"),
     ("ipo_bot.py", "IPO"),
-    ("earnkaro_bot.py", "CARD"),
+    # ("earnkaro_bot.py", "CARD"),
     # ("fashion_beauty_bot.py", "DEALS"),
 ]
 
