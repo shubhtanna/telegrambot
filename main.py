@@ -4,6 +4,10 @@ from telethon.tl.types import (
     MessageMediaPhoto,
     MessageMediaDocument,
     MessageEntityTextUrl,
+    MessageEntityStrike,
+    MessageEntityBold,
+    MessageEntityItalic,
+    MessageEntityCode,
 )
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
@@ -189,6 +193,61 @@ def extract_entity_urls(message):
             urls.append(ent.url)
     return urls
 
+# ── Telegram formatting → WhatsApp markdown ──────────────────────
+#  Telegram carries the MRP strikethrough as a MessageEntityStrike;
+#  raw_text throws that away, so ₹1,499.00 arrives on WhatsApp plain.
+#  WhatsApp renders ~text~ as strikethrough, *bold*, _italic_.
+#
+#  Telegram entity offsets are in UTF-16 code units, NOT Python
+#  characters — an emoji counts as 2. Every offset here is worked
+#  in UTF-16 units or the markers land in the wrong place.
+_WA_MARKERS = {
+    MessageEntityStrike: "~",
+    MessageEntityBold:   "*",
+    MessageEntityItalic: "_",
+    MessageEntityCode:   "```",
+}
+_U16_SPACE = " ".encode("utf-16-le")
+
+def _tg_entities_to_whatsapp(message) -> str:
+    text = (message.raw_text or message.text or "").strip()
+    if not text:
+        return ""
+    ents = [e for e in (message.entities or []) if type(e) in _WA_MARKERS]
+    if not ents:
+        return text
+
+    data  = text.encode("utf-16-le")
+    units = [data[i:i + 2] for i in range(0, len(data), 2)]
+    inserts = collections.defaultdict(list)
+
+    for e in ents:
+        mark  = _WA_MARKERS[type(e)]
+        start = max(0, e.offset)
+        end   = min(len(units), e.offset + e.length)
+        # WhatsApp will not render a span padded with spaces — tighten it
+        while start < end and units[start] == _U16_SPACE:
+            start += 1
+        while end > start and units[end - 1] == _U16_SPACE:
+            end -= 1
+        if end <= start:
+            continue
+        inserts[start].append(("open", mark))
+        inserts[end].append(("close", mark))
+
+    out = []
+    for i in range(len(units) + 1):
+        if i in inserts:
+            # close before open so nested spans don't cross
+            for _, mark in sorted(inserts[i], key=lambda x: 0 if x[0] == "close" else 1):
+                out.append(mark.encode("utf-16-le"))
+        if i < len(units):
+            out.append(units[i])
+
+    formatted = b"".join(out).decode("utf-16-le")
+    log.info(f"[PRICE-ALERT] ✏️ Applied {len(ents)} formatting entity(ies) for WhatsApp")
+    return formatted
+
 def is_price_alert_post(message, text: str) -> bool:
     if not text:
         return False
@@ -201,8 +260,8 @@ def is_price_alert_post(message, text: str) -> bool:
     return (has_cta and (has_price or has_link)) or (has_price and has_link)
 
 def build_price_alert_text(message) -> str:
-    """raw_text + any URL that only existed as a hyperlink entity."""
-    body = (message.raw_text or message.text or "").strip()
+    """WhatsApp-formatted body + any URL that only existed as a hyperlink entity."""
+    body = _tg_entities_to_whatsapp(message)
     for u in extract_entity_urls(message):
         if u not in body:
             body += f"\n👉 {u}"
