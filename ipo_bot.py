@@ -231,6 +231,16 @@ def clean_ipo_message(text: str) -> tuple[str, bool]:
     """
     cleaned = text
 
+    # Telegram source messages often use **double asterisks** for bold.
+    # WhatsApp's formatting engine only recognizes a SINGLE asterisk
+    # (*bold*) as the bold marker — it has no idea what "**" means, so it
+    # just prints the extra stars as literal text instead of bolding
+    # anything. That's exactly the "extra star" problem in your
+    # screenshot. Collapsing any run of 2-or-more asterisks down to one
+    # fixes it regardless of whether they came in a clean pair
+    # (**word**), tripled up (***word***), or slightly mismatched.
+    cleaned = re.sub(r'\*{2,}', '*', cleaned)
+
     # Normalize common source-brand names into our own branding so the
     # review copy is easier to approve and reshare.
     cleaned = SOURCE_BRAND_PATTERN.sub(OUR_GROUP_NAME, cleaned)
