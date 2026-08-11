@@ -122,8 +122,19 @@ APP_PROMO_PATTERN = re.compile(
     r'(?:\bdownload\b.{0,25}\bapp\b|\bapp\b.{0,25}\bdownload\b|'
     r'\ballotment\b.{0,25}\bapp\b|\bapp\b.{0,25}\ballotment\b|'
     r'play\s*store|app\s*store|google\s*play|'
-    r'https?://\S+/download\b)',
-    re.IGNORECASE,
+    # A link ending in "/download" — WITH or WITHOUT an "https://" prefix.
+    # The old pattern required the protocol, so a bare link like
+    # "ipoacademy.com/download" (no "https://" written out) slipped past
+    # it entirely — that's exactly the G.V. Electricals message you
+    # flagged: no "app" keyword, no protocol, just a bare domain ending
+    # in /download.
+    r'[\w-]+\.\w{2,6}/download\b|'
+    # "Click here ... [check] allotment [status]" (either word order) —
+    # this phrasing is always pointing at someone else's allotment-check
+    # tool/page, not real IPO data, regardless of what the link itself
+    # looks like.
+    r'\bclick\s*here\b.{0,60}\ballotment\b|\ballotment\b.{0,60}\bclick\s*here\b)',
+    re.IGNORECASE | re.DOTALL,
 )
 
 # Promotional plumbing that should never be auto-sent directly. If a source
@@ -146,7 +157,7 @@ PROMO_SOCIAL_LINK_PATTERN = re.compile(
 )
 
 SOURCE_BRAND_PATTERN = re.compile(
-    r'\bipo\s*(?:ji|wiz|academy|acend(?:a)?my)\b',
+    r'\bipo\s*(?:ji|wiz|academy|acend(?:a)?my|mantra)\b',
     re.IGNORECASE,
 )
 
@@ -198,6 +209,15 @@ def classify_ipo_message(text: str) -> str:
 # ══════════════════════════════════════════
 WA_LINK_RE = re.compile(r'https?://chat\.whatsapp\.com/\S+', re.IGNORECASE)
 
+# Matches ANY link-shaped token — a full "https://..." URL, or a bare
+# domain written without a protocol (e.g. "ipoji.in/blogs/..."). Used to
+# shield links from the brand-name/label substitutions below — see the
+# comment in clean_ipo_message() for why that's necessary.
+URL_RE = re.compile(
+    r'https?://\S+|(?:www\.)?[a-zA-Z0-9][\w-]*\.(?:com|in|co|io|org|net|app|me|xyz|info)(?:/\S*)?',
+    re.IGNORECASE,
+)
+
 SOCIAL_LINK_RE = re.compile(
     r'https?://(?:www\.)?(?:instagram\.com|twitter\.com|x\.com|youtube\.com|youtu\.be|'
     r'facebook\.com|fb\.me|t\.me)/\S+',
@@ -241,15 +261,30 @@ def clean_ipo_message(text: str) -> tuple[str, bool]:
     # (**word**), tripled up (***word***), or slightly mismatched.
     cleaned = re.sub(r'\*{2,}', '*', cleaned)
 
+    # ---- Shield every URL before any brand/label substitution runs. ----
+    # A source's brand name is often sitting INSIDE their own link — the
+    # domain itself (e.g. "ipoji.in") or a slug at the end (e.g.
+    # "...-ipoji"). SOURCE_BRAND_PATTERN below matches "ipoji" as a whole
+    # word wherever it appears, including there — so run it on the raw
+    # text and it splices "Ipo Insights India" (a name WITH SPACES)
+    # straight into the middle of what has to be one unbroken link,
+    # producing exactly the broken URL you saw: "www.Ipo Insights
+    # India.in/...kfintech-Ipo Insights India". Pulling every link out
+    # into a placeholder first means the substitutions below only ever
+    # touch plain sentence text — links come back out afterwards exactly
+    # as they went in (or get swapped/dropped by the dedicated link rules,
+    # never by the word-matching ones).
+    _urls: list[str] = []
+
+    def _stash_url(m):
+        _urls.append(m.group(0))
+        return f"\uE000{len(_urls) - 1}\uE001"
+
+    cleaned = URL_RE.sub(_stash_url, cleaned)
+
     # Normalize common source-brand names into our own branding so the
     # review copy is easier to approve and reshare.
     cleaned = SOURCE_BRAND_PATTERN.sub(OUR_GROUP_NAME, cleaned)
-
-    # Any WhatsApp invite link that isn't ours -> replace with ours
-    cleaned = WA_LINK_RE.sub(OUR_WA_JOIN_LINK, cleaned)
-
-    # Drop social-media promo lines entirely
-    cleaned = PROMO_SOCIAL_LINK_PATTERN.sub('', cleaned)
 
     # Swap mid-sentence taglines: "Stay tuned with IPO Ji for..." ->
     # "Stay tuned with Ipo Insights India for..."
@@ -269,11 +304,38 @@ def clean_ipo_message(text: str) -> tuple[str, bool]:
         return f"Join {OUR_GROUP_NAME}"
 
     cleaned = GROUP_LABEL_LINE_RE.sub(_swap_label_line, cleaned)
+
+    # ---- Put the links back. ----
+    # A WhatsApp invite link that isn't ours -> replace with ours. A
+    # social-media promo link -> drop it entirely (as before). Anything
+    # else -> restored untouched, so it can never come back mangled. If a
+    # competitor's brand name is embedded in that surviving link's own
+    # domain/slug, we can't safely rewrite a live URL in place — so
+    # instead we flag it below and let the confidence check route the
+    # whole message to review rather than auto-sending a link that still
+    # points at (or names) another platform.
+    _brand_leak_in_url = False
+
+    def _restore_url(m):
+        nonlocal _brand_leak_in_url
+        url = _urls[int(m.group(1))]
+        if WA_LINK_RE.search(url):
+            return OUR_WA_JOIN_LINK
+        if PROMO_SOCIAL_LINK_PATTERN.search(url):
+            return ''
+        if SOURCE_BRAND_PATTERN.search(url):
+            _brand_leak_in_url = True
+        return url
+
+    cleaned = re.sub(r'\uE000(\d+)\uE001', _restore_url, cleaned)
     cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
 
-    # If another group's @handle or t.me link survived the cleanup, don't
-    # risk shipping a competitor's branding — flag it instead.
-    still_has_other_branding = bool(re.search(r'@\w{4,}|https?://t\.me/\S+', cleaned, re.IGNORECASE))
+    # If another group's @handle or t.me link survived the cleanup, or a
+    # competitor's brand name was embedded in a link we chose not to
+    # touch, don't risk shipping that branding — flag it instead.
+    still_has_other_branding = _brand_leak_in_url or bool(
+        re.search(r'@\w{4,}|https?://t\.me/\S+', cleaned, re.IGNORECASE)
+    )
     return cleaned, not still_has_other_branding
 
 

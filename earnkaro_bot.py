@@ -31,6 +31,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -154,7 +155,7 @@ def _load_state() -> dict:
             return json.loads(STATE_FILE.read_text())
         except Exception:
             pass
-    return {"index": 0, "last_sent_slug": None, "last_sent_at": None}
+    return {"queue": [], "last_sent_slug": None, "last_sent_at": None}
 
 
 def _save_state(state: dict):
@@ -164,14 +165,39 @@ def _save_state(state: dict):
         log.warning(f"[STATE] Couldn't save state: {e}")
 
 
-def _resume_index(state: dict, cards: list[dict]) -> int:
-    """Cards may have been added/removed since last run — resume by slug if we can."""
-    last = state.get("last_sent_slug")
-    if last:
-        for i, c in enumerate(cards):
-            if c.get("slug") == last:
-                return (i + 1) % len(cards)
-    return state.get("index", 0) % len(cards)
+def _next_card(state: dict, cards: list[dict]) -> dict:
+    """
+    Picks the next card using a "shuffle bag": every card gets sent
+    exactly once before any card repeats, and each lap's order is freshly
+    randomized — never the same fixed sequence twice.
+
+    This is also what fixes the "starts from card 1 again after every
+    redeploy" problem. Railway's filesystem isn't persisted across
+    deploys unless you attach a volume — a fresh build gets a brand-new,
+    empty container, so EARNKARO_STATE_FILE (this bot's local save-file
+    for "which card is next") gets wiped every single time you push code.
+    With the old sequential index, "wiped state" meant "index resets to
+    0" — always the same first card. With a shuffle bag, "wiped state"
+    just means "start a new random lap" — a different, unpredictable
+    card each time, exactly what you asked for.
+    """
+    by_slug = {c.get("slug"): c for c in cards if c.get("slug")}
+
+    # Drop any leftover queued slug for a card that no longer exists
+    # (removed since the last harvest), so a stale queue can't crash this.
+    queue = [s for s in state.get("queue", []) if s in by_slug]
+
+    if not queue:
+        queue = list(by_slug.keys())
+        random.shuffle(queue)
+        # Don't let a fresh lap immediately repeat the card that just went
+        # out at the end of the previous lap.
+        if len(queue) > 1 and queue[0] == state.get("last_sent_slug"):
+            queue[0], queue[1] = queue[1], queue[0]
+
+    next_slug = queue.pop(0)
+    state["queue"] = queue
+    return by_slug[next_slug]
 
 
 # ══════════════════════════════════════════
@@ -251,14 +277,13 @@ def _seconds_until_next_active_window(now_ist: datetime) -> float:
 #  ONE SEND
 # ══════════════════════════════════════════
 async def send_one(cards: list[dict], state: dict, dry_run: bool = False) -> bool:
-    idx = _resume_index(state, cards)
-    card = cards[idx]
+    card = _next_card(state, cards)
 
     message = build_message(card)
     image_bytes = await get_image_bytes(card)
 
-    log.info(f"[MAIN] Card {idx + 1}/{len(cards)}: {card['title']} "
-             f"(image: {'yes' if image_bytes else 'no'})")
+    log.info(f"[MAIN] Card: {card['title']} "
+             f"({len(state['queue'])} left in this random lap, image: {'yes' if image_bytes else 'no'})")
 
     if dry_run:
         print("\n--- MESSAGE THAT WOULD BE SENT ---")
@@ -270,7 +295,6 @@ async def send_one(cards: list[dict], state: dict, dry_run: bool = False) -> boo
     await send_card_to_whatsapp(message, image_bytes)
     await maybe_bulk_broadcast(message, image_bytes)
 
-    state["index"] = (idx + 1) % len(cards)
     state["last_sent_slug"] = card.get("slug")
     state["last_sent_at"] = datetime.now(IST).isoformat(timespec="seconds")
     _save_state(state)
@@ -285,10 +309,17 @@ async def run(args):
 
     if args.list:
         state = _load_state()
-        nxt = _resume_index(state, cards) if cards else 0
-        print(f"\n{len(cards)} sendable card(s) — send order:\n")
-        for i, c in enumerate(cards):
-            marker = " ← NEXT" if i == nxt else ""
+        by_slug = {c.get("slug"): c for c in cards if c.get("slug")}
+        queue = [s for s in state.get("queue", []) if s in by_slug]
+        note = ""
+        if not queue:
+            queue = list(by_slug.keys())
+            random.shuffle(queue)
+            note = "  (new lap — this exact order is just a preview; the real send re-shuffles)"
+        print(f"\n{len(cards)} sendable card(s) — upcoming random-lap order:{note}\n")
+        for i, slug in enumerate(queue):
+            c = by_slug[slug]
+            marker = " ← NEXT" if i == 0 else ""
             img = "img" if c.get("image_file") else "NO IMG"
             print(f"  {i + 1:>3}. [{img:>6}] {c['title'][:70]}{marker}")
         print()
