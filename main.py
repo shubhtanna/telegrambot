@@ -356,6 +356,12 @@ stats = {
 # ══════════════════════════════════════════
 #  DAILY LUCKY DEAL COUNTER
 # ══════════════════════════════════════════
+# Temporarily OFF, per your request. This doesn't delete the feature —
+# it just gates it behind an env var, so turning it back on later is a
+# Railway dashboard change (set LUCKY_DEALS_ENABLED=1), not a code push.
+# Default here is "0" (off) so it stays off until you flip it.
+LUCKY_DEALS_ENABLED = os.environ.get("LUCKY_DEALS_ENABLED", "0") == "1"
+
 LUCKY_DEALS_PER_DAY = 18
 _daily_counter_date = None
 _daily_deal_count   = 0
@@ -1385,7 +1391,7 @@ async def handle_dealspouch(event):
 
     # ── Step 2: Lucky deal swap (generic only) ───────────────────
     tg_text = text
-    if deal_type == "generic" and _is_lucky_deal():
+    if LUCKY_DEALS_ENABLED and deal_type == "generic" and _is_lucky_deal():
         lucky_link = _get_lucky_link()
         tg_text = re.sub(r'https?://amaz\.dealspouch\.com/\S+', lucky_link, tg_text, count=1)
         log.info(f"[DAILY] 🎯 Lucky deal #{_daily_deal_count} — replaced dealspouch link with {lucky_link}")
@@ -1435,7 +1441,7 @@ async def run():
             log.info(f"📲 Beauty WA Group    : {BEAUTY_WA_GROUP}")
             log.info(f"📲 WA Sender          : {BAILEYS_URL or 'NOT SET'}")
             log.info(f"⏱️  Freshness limit    : {MAX_DEAL_AGE_MINUTES} min")
-            log.info(f"🎯 Lucky deals / day  : {LUCKY_DEALS_PER_DAY}")
+            log.info(f"🎯 Lucky deals       : {'ON — ' + str(LUCKY_DEALS_PER_DAY) + '/day' if LUCKY_DEALS_ENABLED else 'OFF (temporarily disabled)'}")
             log.info("─" * 55)
             log.info("PRICE-ALERT FLOW (Dealspouch price alert bot posts):")
             log.info("  Detected → WA bulk (no ExtraPe, no Dealspouch, no TG)")
