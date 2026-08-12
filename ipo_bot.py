@@ -514,6 +514,27 @@ async def handle_review_response(event):
     if text.startswith(REVIEW_REQUEST_MARKER):
         return
 
+    # "/sent <text>" — for when YOU typed something straight into the
+    # WhatsApp group yourself (e.g. an urgent allotment update), bypassing
+    # the bot entirely. The bot has no read access to WhatsApp, so it can
+    # never see that message on its own — which is exactly why a source
+    # group's repost of the same news later looks like fresh info to it
+    # and gets sent again, right under your own message. This registers
+    # your text with the SAME dedup fingerprinting the bot already uses
+    # for its own sends, so a matching repost within the dedup window gets
+    # silently skipped instead of duplicated. Nothing gets sent here —
+    # you already sent it.
+    stripped = text.strip()
+    if re.match(r'^/sent\b', stripped, re.IGNORECASE):
+        manual_text = re.sub(r'^/sent\b\s*', '', stripped, flags=re.IGNORECASE).strip()
+        if not manual_text:
+            await event.reply("Add the text you sent, e.g. `/sent Technocraft Ventures allotment out, check ipo.bigshareonline.com`")
+            return
+        _remember_sent(manual_text)
+        await event.reply("👍 Noted — a matching repost from a source group will be skipped for the next 90 min.")
+        log.info(f"[REVIEW] Manually-sent message registered for dedup: {manual_text[:80]!r}")
+        return
+
     _purge_pending()
     norm_reply = _normalize_for_dedup(text)
     best_id, best_ratio = None, 0.0
