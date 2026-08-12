@@ -376,6 +376,7 @@ LUCKY_DEAL_LINKS    = [
 _lucky_link_pool    = []               # Pool of randomized links (6 of each)
 _lucky_link_index   = 0                # Current position in pool
 WA_INVITE_LINK      = "https://tinyurl.com/fhknr97k"
+CC_WA_FOOTER = "\n\nFor More Such Credit Card Deals Visit - https://www.dealspouch.com/finance"
 TG_BOT_FOOTER = (
     "\n\n🔔 Price Tracker - https://www.dealspouch.com/price-alert"
     "\n🌐 Dealspouch Website - https://www.dealspouch.com/"
@@ -955,7 +956,7 @@ async def handle_source(event):
                 log.info("[CC-DIRECT] 🌙 Quiet hours — skipping"); stats["ignored"] += 1
                 _trace("SOURCE", route="finnin_cc", action="skipped_quiet", chat=chat_id)
             else:
-                await send_to_whatsapp_single(text, CC_WA_GROUP, media_bytes)
+                await send_to_whatsapp_single(text + CC_WA_FOOTER, CC_WA_GROUP, media_bytes)
                 stats["cc_sent_direct"] += 1
                 log.info("[CC-DIRECT] ✅ Sent to CC WA")
                 _trace("SOURCE", route="finnin_cc", action="wa_single", target=CC_WA_GROUP, chat=chat_id)
@@ -1271,7 +1272,7 @@ async def handle_extrape(event):
             stats["ignored"] += 1
             _trace("EXTRAPE", route="generic_cc", action="skipped_quiet")
         else:
-            await send_to_whatsapp_single(text, CC_WA_GROUP, media_bytes)
+            await send_to_whatsapp_single(text + CC_WA_FOOTER, CC_WA_GROUP, media_bytes)
             stats["cc_sent_via_extrape"] += 1
             _trace("EXTRAPE", route="generic_cc", action="wa_single", target=CC_WA_GROUP)
         return

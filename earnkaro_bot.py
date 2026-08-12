@@ -54,6 +54,11 @@ STATE_FILE = Path(os.environ.get("EARNKARO_STATE_FILE", str(BASE_DIR / "earnkaro
 
 SEND_INTERVAL_SECONDS = int(os.environ.get("EARNKARO_INTERVAL_SECONDS", 16200))  # 3.5 hours
 
+# Appended right below the apply link on every card message — lives here
+# (not in cards.json) so it applies to every card automatically,
+# including ones added by a future harvest, without editing the data file.
+CC_FOOTER = "For More Such Credit Card Deals Visit - https://www.dealspouch.com/finance"
+
 BAILEYS_URL = os.environ.get("BAILEYS_URL")
 BAILEYS_SECRET = os.environ.get("BAILEYS_SECRET", "mysecret123")
 WA_GROUPS = [g.strip() for g in os.environ.get("EARNKARO_WA_GROUPS", "").split(",") if g.strip()]
@@ -206,6 +211,7 @@ def _next_card(state: dict, cards: list[dict]) -> dict:
 def build_message(card: dict) -> str:
     lines = [card["title"], ""]
     lines += [f"Card Apply Link : {card.get('apply_link') or '(not found)'}", ""]
+    lines += [CC_FOOTER, ""]
 
     if card.get("fees_heading") or card.get("fees"):
         if card.get("fees_heading"):
