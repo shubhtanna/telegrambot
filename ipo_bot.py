@@ -96,12 +96,21 @@ ACTIVE_START_HOUR = 8  # 8:00 AM IST — quiet hours run from 1:00 AM to 7:59 AM
 #  allotment notices.
 # ══════════════════════════════════════════
 IPO_TYPE_PATTERNS = {
-    "gmp_update":          re.compile(r'\bGMP\s*Update\b', re.IGNORECASE),
-    "subscription_update": re.compile(r'\bSubscription\s*Update\b', re.IGNORECASE),
-    "listing_update":      re.compile(r'\bList(?:ed|ing)\b.{0,80}\b(?:NSE|BSE|premium|issue price)\b', re.IGNORECASE | re.DOTALL),
-    "ipo_announcement":    re.compile(r'\bIPO\b.{0,120}\b(?:Issue Size|Face Value|Retail Portion|Expected Soon)\b', re.IGNORECASE | re.DOTALL),
+    # Plural forms ("GMP Updates", "Subscription Updates", "MB Listings")
+    # are just as common in real source posts as the singular the old
+    # patterns required — and a plain "s" was enough to send a perfectly
+    # safe message to review instead of straight through.
+    "gmp_update":          re.compile(r'\bGMP\s*Updates?\b', re.IGNORECASE),
+    "subscription_update": re.compile(r'\bSubscription\s*Updates?\b', re.IGNORECASE),
+    "listing_update":      re.compile(r'\bList(?:ed|ings?)\b.{0,80}\b(?:NSE|BSE|premium|issue price)\b', re.IGNORECASE | re.DOTALL),
+    "ipo_announcement":    re.compile(r'\bIPO\b.{0,120}\b(?:Issue Size|Face Value|Retail Portion|Retail Lot|Expected Soon)\b', re.IGNORECASE | re.DOTALL),
     "todays_events":       re.compile(r"Today'?s\s+IPO\s+Events", re.IGNORECASE),
     "allotment":           re.compile(r'\bAllotment\b', re.IGNORECASE),
+    # Structured "fact card" listing posts (Symbol / BSE Code / IPO Price /
+    # ISIN all listed as fields) — a completely different template from
+    # the others above, but just as clearly real IPO data. Order-independent
+    # (Symbol usually comes before ISIN, but this doesn't assume that).
+    "ipo_detail_card":     re.compile(r'(?=.*\bSymbol\b)(?=.*\bISIN\b)', re.IGNORECASE | re.DOTALL),
 }
 
 # Content that has no business in an IPO update — anything matching this
