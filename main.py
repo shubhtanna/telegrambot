@@ -377,11 +377,11 @@ _lucky_link_pool    = []               # Pool of randomized links (6 of each)
 _lucky_link_index   = 0                # Current position in pool
 WA_INVITE_LINK      = "https://tinyurl.com/fhknr97k"
 CC_WA_FOOTER = "\n\nFor More Such Credit Card Deals Visit - https://www.dealspouch.com/finance"
-# TG_BOT_FOOTER = (
-#     # "\n\n🔔 Price Tracker - https://www.dealspouch.com/price-alert"
-#     "\n🌐 Dealspouch Website - https://www.dealspouch.com/"
-#     # "\n🤖 Telegram Bot - https://t.me/Dealspouch_Product_bot"
-# )
+TG_BOT_FOOTER = (
+    # "\n\n🔔 Price Tracker - https://www.dealspouch.com/price-alert"
+    # "\n🌐 Dealspouch Website - https://www.dealspouch.com/"
+    # "\n🤖 Telegram Bot - https://t.me/Dealspouch_Product_bot"
+)
 
 def _refresh_daily_counter():
     global _daily_counter_date, _daily_deal_count, _lucky_deal_slots, _lucky_link_pool, _lucky_link_index
