@@ -1397,7 +1397,8 @@ async def handle_dealspouch(event):
         tg_text = re.sub(r'https?://amaz\.dealspouch\.com/\S+', lucky_link, tg_text, count=1)
         log.info(f"[DAILY] 🎯 Lucky deal #{_daily_deal_count} — replaced dealspouch link with {lucky_link}")
 
-    tg_text = tg_text + TG_BOT_FOOTER
+    # tg_text = tg_text + TG_BOT_FOOTER
+    tg_text = tg_text
 
     # ── Step 3: Post to TG (all types) ───────────────────────────
     try:
