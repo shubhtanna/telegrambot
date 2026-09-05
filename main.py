@@ -164,21 +164,32 @@ def classify_special_deal(text: str) -> str:
 #  These come from the Dealspouch price-alert bot and land directly
 #  in the Telegram group. Signature:
 #    • photo attached
-#    • CTA "Read the full deal" (a hyperlink ENTITY, not inline text)
-#    • price line: ₹new ₹old (NN% off)
-#    • dealspouch.com URL hidden inside the CTA entity
+#    • CTA such as "Read the full deal" or "Buy on Amazon"
+#      (usually a hyperlink ENTITY, not an inline URL)
+#    • price line: ₹new ₹old (NN% off) or ₹new ₹old NN% OFF
+#    • product / price-history URL hidden inside a CTA entity
 #
 #  These skip ExtraPe / Dealspouch entirely and go straight to the
 #  main WhatsApp bulk endpoint.
 # ══════════════════════════════════════════
 PRICE_ALERT_TG_GROUP = MY_TG_GROUP          # "@finnindeals2"
 
-PRICE_ALERT_CTA = re.compile(r'read the full (?:deal|blog)|shop now', re.IGNORECASE)
+PRICE_ALERT_CTA = re.compile(
+    r'read the full (?:deal|blog)|shop now|buy on (?:amazon|flipkart)|'
+    r'see (?:its|the) price history|check out this deal on (?:amazon|flipkart)',
+    re.IGNORECASE,
+)
 PRICE_ALERT_PRICE = re.compile(
-    r'₹\s*[\d,]+(?:\.\d+)?\s*₹\s*[\d,]+(?:\.\d+)?[^\n]{0,25}?\(\s*\d{1,3}\s*%\s*off\s*\)',
+    r'₹\s*[\d,]+(?:\.\d+)?\s*₹\s*[\d,]+(?:\.\d+)?'
+    r'[^\n]{0,25}?\(?\s*\d{1,3}\s*%\s*off\s*\)?',
     re.IGNORECASE
 )
 PRICE_ALERT_LINK = re.compile(r'https?://(?:www\.)?dealspouch\.com/\S+', re.IGNORECASE)
+PRICE_ALERT_STORE_LINK = re.compile(
+    r'https?://(?:www\.)?(?:amazon\.in|amzn\.in|amzn\.to|amazon\.com|'
+    r'flipkart\.com|fkrt\.\w+|dl\.flipkart\.com)/?\S*',
+    re.IGNORECASE,
+)
 
 # Our own reposts into @finnindeals2 carry the footer — never re-ingest them
 OUR_REPOST_MARKERS = ("t.me/Dealspouch_Product_bot", "dealspouch.com/price-alert")
@@ -256,8 +267,15 @@ def is_price_alert_post(message, text: str) -> bool:
     blob      = text + " " + " ".join(extract_entity_urls(message))
     has_cta   = bool(PRICE_ALERT_CTA.search(blob))
     has_price = bool(PRICE_ALERT_PRICE.search(blob))
-    has_link  = bool(PRICE_ALERT_LINK.search(blob))
-    return (has_cta and (has_price or has_link)) or (has_price and has_link)
+    has_dealspouch_link = bool(PRICE_ALERT_LINK.search(blob))
+    has_store_link      = bool(PRICE_ALERT_STORE_LINK.search(blob))
+
+    # The compact Dealspouch card shown in Finnin Deals has two linked CTA
+    # lines ("Buy on Amazon" and "See its price history") and writes the
+    # discount as "54% OFF", without parentheses.  Requiring both a price
+    # signature and either a known CTA or product link keeps ordinary chat
+    # messages from being routed as cards.
+    return has_price and (has_cta or has_dealspouch_link or has_store_link)
 
 def build_price_alert_text(message) -> str:
     """WhatsApp-formatted body + any URL that only existed as a hyperlink entity."""
@@ -291,7 +309,15 @@ def price_alert_category(text: str) -> str:
             continue
         if PRICE_ALERT_CTA.search(line) or line.startswith("₹") or line.startswith("http"):
             continue
-        cat = classify_special_deal(line)          # title line only
+        # Beauty terms are more product-specific than broad fashion terms
+        # such as "women" or "men".  Prefer beauty if a title contains both
+        # (for example, "Women's Perfume").
+        if is_beauty_deal(line):
+            cat = "beauty"
+        elif is_fashion_deal(line):
+            cat = "fashion"
+        else:
+            cat = "generic"
         log.info(f"[PRICE-ALERT] 🏷️ Title classify → {cat} | {line[:70]}")
         return cat
 
@@ -839,8 +865,9 @@ async def _send_to_dealspouch(text, media_bytes, deal_type):
 
 # ══════════════════════════════════════════
 #  PRICE-ALERT DISPATCH  ← NEW
-#  Straight to the main WhatsApp bulk endpoint only.
-#  No ExtraPe, no Dealspouch, no TG repost, no category groups.
+#  Straight to the main WhatsApp bulk endpoint, plus the matching
+#  fashion/beauty group when the product title identifies one.
+#  No ExtraPe, no Dealspouch conversion, and no TG repost.
 # ══════════════════════════════════════════
 async def _dispatch_price_alert(message):
     text = build_price_alert_text(message)
@@ -893,7 +920,7 @@ async def _dispatch_price_alert(message):
 #  STEP 1 — Source groups → detect & dispatch
 #
 #  Priority order inside each message:
-#  0. Price-alert post → WA bulk direct (no ExtraPe/Dealspouch)   ← NEW
+#  0. Price-alert post → WA bulk + matching category group       ← NEW
 #  1. CC deal          → ExtraPe (deal_type=generic, is_cc=True)
 #  2. Fashion deal     → ExtraPe (deal_type=fashion)
 #  3. Beauty deal      → ExtraPe (deal_type=beauty)
@@ -1436,7 +1463,7 @@ async def run():
             log.info(f"🤖 EarnKaro Bot       : {EARNKARO_BOT}")
             log.info(f"🤖 Dealspouch Bot     : {DEALSPOUCH_BOT}")
             log.info(f"📢 TG Group           : {MY_TG_GROUP}")
-            log.info(f"🔔 Price-alert watch  : {PRICE_ALERT_TG_GROUP} + {CC_DIRECT_GROUP} → WA bulk only")
+            log.info(f"🔔 Deal-card watch    : {PRICE_ALERT_TG_GROUP} + {CC_DIRECT_GROUP} → WA bulk + category WA")
             log.info(f"📲 FK WA Group        : {FK_WA_GROUP}")
             log.info(f"📲 CC WA Group        : {CC_WA_GROUP}")
             log.info(f"📲 Fashion WA Group   : {FASHION_WA_GROUP}")
