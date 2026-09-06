@@ -179,6 +179,7 @@ PRICE_ALERT_CTA = re.compile(
     r'see (?:its|the) price history|check out this deal on (?:amazon|flipkart)',
     re.IGNORECASE,
 )
+PRICE_HISTORY_KEYWORD = re.compile(r'\bprice\s+history\b', re.IGNORECASE)
 PRICE_ALERT_PRICE = re.compile(
     r'₹\s*[\d,]+(?:\.\d+)?\s*₹\s*[\d,]+(?:\.\d+)?'
     r'[^\n]{0,25}?\(?\s*\d{1,3}\s*%\s*off\s*\)?',
@@ -195,6 +196,7 @@ PRICE_ALERT_STORE_LINK = re.compile(
 OUR_REPOST_MARKERS = ("t.me/Dealspouch_Product_bot", "dealspouch.com/price-alert")
 
 price_alert_seen = set()
+price_alert_seen_message_ids = set()
 
 def extract_entity_urls(message):
     """Pull hidden URLs out of hyperlink entities — raw_text does NOT contain them."""
@@ -265,10 +267,17 @@ def is_price_alert_post(message, text: str) -> bool:
     if any(m in text for m in OUR_REPOST_MARKERS):
         return False                                   # our own repost — ignore
     blob      = text + " " + " ".join(extract_entity_urls(message))
+    has_price_history = bool(PRICE_HISTORY_KEYWORD.search(blob))
     has_cta   = bool(PRICE_ALERT_CTA.search(blob))
     has_price = bool(PRICE_ALERT_PRICE.search(blob))
     has_dealspouch_link = bool(PRICE_ALERT_LINK.search(blob))
     has_store_link      = bool(PRICE_ALERT_STORE_LINK.search(blob))
+
+    # "Price history" is the definitive Dealspouch-card signature.  Route it
+    # even if Telegram delivers an incomplete/edited caption without the
+    # expected price layout or hidden product URL.
+    if has_price_history:
+        return True
 
     # The compact Dealspouch card shown in Finnin Deals has two linked CTA
     # lines ("Buy on Amazon" and "See its price history") and writes the
@@ -872,13 +881,32 @@ async def _send_to_dealspouch(text, media_bytes, deal_type):
 async def _dispatch_price_alert(message):
     text = build_price_alert_text(message)
 
-    # Dedup — the same alert can reach us twice (edit / re-forward)
+    # Telegram may deliver the same card as NewMessage and MessageEdited.
+    # Claim its stable chat/message identity before the first await so the two
+    # handlers cannot enqueue duplicate WhatsApp sends.
+    peer = getattr(message, "peer_id", None)
+    peer_id = (
+        getattr(peer, "channel_id", None)
+        or getattr(peer, "chat_id", None)
+        or getattr(peer, "user_id", None)
+        or repr(peer)
+    )
+    message_key = (peer_id, getattr(message, "id", None))
+    if message_key in price_alert_seen_message_ids:
+        log.info("[PRICE-ALERT] ⏭️ Duplicate message/edit — skipping")
+        _trace("PRICE-ALERT", action="duplicate_message")
+        return
+
+    # Content dedup also catches the same alert being re-forwarded.
     key = hash(_normalize_text(text))
     if key in price_alert_seen:
         log.info("[PRICE-ALERT] ⏭️ Duplicate — skipping")
         _trace("PRICE-ALERT", action="duplicate")
         return
+    price_alert_seen_message_ids.add(message_key)
     price_alert_seen.add(key)
+    if len(price_alert_seen_message_ids) > 300:
+        price_alert_seen_message_ids.pop()
     if len(price_alert_seen) > 300:
         price_alert_seen.pop()
 
@@ -930,10 +958,8 @@ async def _dispatch_price_alert(message):
 #                   CC goes direct to CC WA (no ExtraPe)
 # ══════════════════════════════════════════
 @client.on(events.NewMessage(chats=SOURCE_GROUPS))
+@client.on(events.MessageEdited(chats=SOURCE_GROUPS))
 async def handle_source(event):
-    if event.message.edit_date:
-        return
-
     text    = event.message.text or event.message.caption or ""
     chat_id = event.chat_id
 
@@ -1068,8 +1094,9 @@ async def handle_source(event):
 #  we post would loop straight back into the pipeline.
 # ══════════════════════════════════════════
 @client.on(events.NewMessage(chats=PRICE_ALERT_TG_GROUP))
+@client.on(events.MessageEdited(chats=PRICE_ALERT_TG_GROUP))
 async def handle_price_alert_group(event):
-    if event.out or event.message.edit_date:
+    if event.out:
         return
     msg  = event.message
     text = msg.text or msg.caption or ""
