@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import random
+import unicodedata
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -227,22 +228,46 @@ def build_message(card: dict) -> str:
 
 
 # ══════════════════════════════════════════
-#  WHATSAPP SEND  (unchanged — multipart 'text' + file field 'image')
+#  WHATSAPP SEND — multipart with an image, JSON when text-only
 # ══════════════════════════════════════════
+def _prepare_wa_text(text: str | None) -> str | None:
+    """Reject whitespace/control-only payloads that become blank WA bubbles."""
+    cleaned = (text or "").strip()
+    has_visible_character = any(
+        not char.isspace() and unicodedata.category(char) not in {"Cc", "Cf"}
+        for char in cleaned
+    )
+    return cleaned if has_visible_character else None
+
+
 async def send_to_targets(text: str, image_bytes: bytes | None, targets: list[str]):
     if not BAILEYS_URL or not targets:
         return
+    text = _prepare_wa_text(text)
+    if text is None:
+        log.error("[WA] Dropped empty/invisible message before it reached WhatsApp")
+        return
+
+    targets = list(dict.fromkeys(target.strip() for target in targets if target.strip()))
     async with aiohttp.ClientSession() as session:
         for target in targets:
             try:
-                form = aiohttp.FormData()
-                form.add_field("text", text)
-                form.add_field("secret", BAILEYS_SECRET)
-                form.add_field("target", target)
                 if image_bytes:
+                    form = aiohttp.FormData()
+                    form.add_field("text", text)
+                    form.add_field("secret", BAILEYS_SECRET)
+                    form.add_field("target", target)
                     form.add_field("image", image_bytes, filename="card.jpg", content_type="image/jpeg")
-                async with session.post(f"{BAILEYS_URL}/send-single", data=form,
-                                        timeout=aiohttp.ClientTimeout(total=30)) as r:
+                    request_kwargs = {"data": form}
+                else:
+                    request_kwargs = {
+                        "json": {"text": text, "secret": BAILEYS_SECRET, "target": target}
+                    }
+                async with session.post(
+                    f"{BAILEYS_URL}/send-single",
+                    timeout=aiohttp.ClientTimeout(total=30),
+                    **request_kwargs,
+                ) as r:
                     status, body = r.status, await r.text()
                 log.info(f"[WA] {'Sent' if status == 200 else 'FAILED'} to {target} ({status}: {body[:80]})")
             except Exception as e:

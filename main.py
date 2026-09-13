@@ -11,7 +11,7 @@ from telethon.tl.types import (
 )
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
-import asyncio, re, io, logging, time, aiohttp, os, threading, pytz, collections, random, json, itertools
+import asyncio, re, io, logging, time, aiohttp, os, threading, pytz, collections, random, json, itertools, unicodedata
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -790,9 +790,23 @@ async def _enqueue_wa_job(job):
 # ══════════════════════════════════════════
 #  WHATSAPP SENDERS
 # ══════════════════════════════════════════
+def _prepare_wa_text(text):
+    """Reject whitespace/control-only payloads that become blank WA bubbles."""
+    cleaned = (text or "").strip()
+    has_visible_character = any(
+        not char.isspace() and unicodedata.category(char) not in {"Cc", "Cf"}
+        for char in cleaned
+    )
+    return cleaned if has_visible_character else None
+
+
 async def send_to_whatsapp_bulk(text, image_bytes=None):
     if not BAILEYS_URL:
         log.warning("[WA-BULK] BAILEYS_URL not set!"); return
+    text = _prepare_wa_text(text)
+    if text is None:
+        log.error("[WA-BULK] Dropped empty/invisible message before it reached WhatsApp")
+        return
     if not _wa_hourly_cap_ok():
         return
 
@@ -827,6 +841,14 @@ async def send_to_whatsapp_bulk(text, image_bytes=None):
 async def send_to_whatsapp_single(text, target_group, image_bytes=None):
     if not BAILEYS_URL:
         log.warning("[WA-SINGLE] BAILEYS_URL not set!"); return
+    text = _prepare_wa_text(text)
+    if text is None:
+        log.error("[WA-SINGLE] Dropped empty/invisible message before it reached WhatsApp")
+        return
+    target_group = (target_group or "").strip()
+    if not target_group:
+        log.error("[WA-SINGLE] Dropped message because the target group is empty")
+        return
     if not _wa_hourly_cap_ok():
         return
 
