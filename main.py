@@ -91,7 +91,7 @@ BANK_NAMES = re.compile(
     re.IGNORECASE
 )
 CC_FALSE_POSITIVE = re.compile(
-    r'(?:amazon\.in/(?:dp|gp)|amzn\.(?:in|to)|flipkart\.com/|fkrt\.\w+|'
+    r'(?:amazon\.in/(?:dp|gp)|amzn\.(?:in|to)|amzn-to\.co/|flipkart\.com/|fkrt\.\w+|'
     r'(?:buy|order|shop)(?: now| here| at)?\s*[:\-]?\s*https?://|'
     r'(?:loot|deal|offer)\s+at\s+₹|after\s+cashback\s+₹|'
     r'collect\s+cashback\s*[:\-]?\s*https?://)',
@@ -188,6 +188,7 @@ PRICE_ALERT_PRICE = re.compile(
 PRICE_ALERT_LINK = re.compile(r'https?://(?:www\.)?dealspouch\.com/\S+', re.IGNORECASE)
 PRICE_ALERT_STORE_LINK = re.compile(
     r'https?://(?:www\.)?(?:amazon\.in|amzn\.in|amzn\.to|amazon\.com|'
+    r'amzn-to\.co|'
     r'flipkart\.com|fkrt\.\w+|dl\.flipkart\.com)/?\S*',
     re.IGNORECASE,
 )
@@ -472,7 +473,7 @@ source_seen_hashes          = set()
 def extract_amazon_links(text):
     if not text: return []
     return re.findall(
-        r'https?://(?:www\.)?(?:amazon\.in|amzn\.in|amzn\.to|amazon\.com)[^\s]*', text)
+        r'https?://(?:www\.)?(?:amazon\.in|amzn\.in|amzn\.to|amzn-to\.co|amazon\.com)[^\s]*', text)
 
 def extract_flipkart_links_source(text):
     if not text: return []
